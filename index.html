@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Verve Distribution Portal</title>
+  <link rel="stylesheet" href="css/styles.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Verve Distribution Portal</h1>
+    <p class="subtitle">Generate and distribute individual session files to photographers and designers</p>
+  </header>
+
+  <main>
+    <!-- Step 1: Upload -->
+    <section id="step-upload" class="step active">
+      <div class="step-header">
+        <span class="step-number">1</span>
+        <div>
+          <h2>Upload Source Files</h2>
+          <p>Drop your data files below. Contact list is optional — you can type emails in the next step.</p>
+        </div>
+      </div>
+
+      <div class="upload-grid">
+        <div class="upload-group">
+          <h3>Photographer Files</h3>
+          <div class="upload-zone" id="zone-photo-eligible" data-key="photoEligible">
+            <div class="zone-icon">📷</div>
+            <div class="zone-label">Eligible Sessions</div>
+            <div class="zone-status">Drop .xlsx here or click to browse</div>
+            <input type="file" accept=".xlsx,.xls,.csv" hidden>
+          </div>
+          <div class="upload-zone" id="zone-photo-noshow" data-key="photoNoShow">
+            <div class="zone-icon">📷</div>
+            <div class="zone-label">No Show Sessions</div>
+            <div class="zone-status">Drop .xlsx here or click to browse</div>
+            <input type="file" accept=".xlsx,.xls,.csv" hidden>
+          </div>
+        </div>
+
+        <div class="upload-group">
+          <h3>Designer Files</h3>
+          <div class="upload-zone" id="zone-design-eligible" data-key="designEligible">
+            <div class="zone-icon">🎨</div>
+            <div class="zone-label">Eligible Appointments</div>
+            <div class="zone-status">Drop .xlsx here or click to browse</div>
+            <input type="file" accept=".xlsx,.xls,.csv" hidden>
+          </div>
+          <div class="upload-zone" id="zone-design-noshow" data-key="designNoShow">
+            <div class="zone-icon">🎨</div>
+            <div class="zone-label">No Show Appointments</div>
+            <div class="zone-status">Drop .xlsx here or click to browse</div>
+            <input type="file" accept=".xlsx,.xls,.csv" hidden>
+          </div>
+        </div>
+
+        <div class="upload-group full-width">
+          <h3>Contact List <span class="optional-badge">Optional</span></h3>
+          <div class="upload-zone" id="zone-contacts" data-key="contacts">
+            <div class="zone-icon">📧</div>
+            <div class="zone-label">Contractor Emails</div>
+            <div class="zone-status">Drop .xlsx or .csv with Name + Email columns, or skip and type them manually</div>
+            <input type="file" accept=".xlsx,.xls,.csv" hidden>
+          </div>
+          <div class="contacts-memory-note" id="contactsMemoryNote"></div>
+        </div>
+      </div>
+
+      <div class="period-input">
+        <label for="periodLabel">Period Label <span class="hint">(used in filenames and email subject)</span></label>
+        <input type="text" id="periodLabel" placeholder="e.g. Fortnight Ending 29-Jul-2026">
+      </div>
+
+      <div class="action-bar">
+        <button id="btnProcess" class="btn primary" disabled>Process Files</button>
+        <div id="uploadSummary" class="upload-summary"></div>
+      </div>
+    </section>
+
+    <!-- Step 2: Preview, Edit Emails & Send -->
+    <section id="step-preview" class="step">
+      <div class="step-header">
+        <span class="step-number">2</span>
+        <div>
+          <h2>Preview, Edit Emails & Send</h2>
+          <p id="previewSubtitle"></p>
+        </div>
+      </div>
+
+      <div id="warnings" class="warnings"></div>
+
+      <div class="preview-controls">
+        <div class="filter-bar">
+          <button class="filter-btn active" data-filter="all">All</button>
+          <button class="filter-btn" data-filter="photographer">Photographers</button>
+          <button class="filter-btn" data-filter="designer">Designers</button>
+          <button class="filter-btn" data-filter="no-email">Missing Email</button>
+        </div>
+        <div class="download-actions">
+          <button id="btnExportContacts" class="btn secondary" title="Save your contact list as a CSV for use on another device">Export Contacts</button>
+          <button id="btnDownloadAll" class="btn primary">Download All as ZIP</button>
+          <button id="btnBack" class="btn secondary">Back</button>
+        </div>
+      </div>
+
+      <div id="previewTable" class="preview-table-container"></div>
+
+      <!-- Email send section -->
+      <div class="send-section">
+        <div class="send-section-header">
+          <h3>Email Distribution</h3>
+        </div>
+
+        <div class="email-config">
+          <div class="config-row">
+            <label for="emailSubject">Subject Line</label>
+            <input type="text" id="emailSubject" value="Your Verve Sessions — {period}" placeholder="Use {name} and {period} as placeholders">
+          </div>
+          <div class="config-row">
+            <label for="emailBody">Email Message</label>
+            <textarea id="emailBody" rows="5" placeholder="Use {name} and {period} as placeholders">Hi {name},
+
+Please find attached your session summary for {period}.
+
+If you have any questions, please don't hesitate to reach out.
+
+Kind regards,
+Verve Portraits</textarea>
+          </div>
+          <div class="config-row">
+            <label for="testEmail">Your Email <span class="hint">(for test sends)</span></label>
+            <input type="email" id="testEmail" placeholder="you@example.com">
+          </div>
+        </div>
+
+        <div class="send-actions">
+          <button id="btnSendTest" class="btn secondary">Send Test to Me</button>
+          <button id="btnSendAll" class="btn primary">Send All Emails</button>
+        </div>
+
+        <div id="sendResults" class="send-results"></div>
+      </div>
+
+      <!-- Progress overlay -->
+      <div id="progressOverlay" class="progress-overlay hidden">
+        <div class="progress-card">
+          <div class="progress-title" id="progressTitle">Processing…</div>
+          <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+          <div class="progress-text" id="progressText">0 / 0</div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="js/app.js"></script>
+</body>
+</html>
