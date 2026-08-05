@@ -1,42 +1,332 @@
 /* ===================================================================
    Verve Distribution Portal — app.js
-   Upload → Parse → Split → Style → Download / Email
+   Upload → Normalise → Split → Style → Download / Email
    =================================================================== */
 (() => {
   'use strict';
 
-  // ── State ──────────────────────────────────────────────────────────
+  // ── Column normalisation ───────────────────────────────────────────
+  const COLUMN_RENAME_MAP = {
+    'sales representative': '_NAME_',
+    'photographer':         '_NAME_',
+    'designer':             '_NAME_',
+    'user name':            '_NAME_',
+
+    'ranking':                    'Ranking',
+    'ranKING':                    'Ranking',
+    'session date':               'Session Date',
+    'apptmt date':                'Appointment Date',
+    'appointment date':           'Appointment Date',
+    'inv date':                   'Appointment Date',
+    'invoice date':               'Appointment Date',
+    'session no':                 'Session No',
+    'session number':             'Session No',
+    'session no.':                'Session No',
+    'invoice no':                 'Invoice No',
+    'invoice number':             'Invoice No',
+    'inv number':                 'Invoice No',
+    'client':                     'Client',
+    'client name':                'Client',
+    'location':                   'Location',
+    'invoice location number':    'Location',
+    'session location number':    'Location',
+    'session type':               'Session Type',
+    'marketing channel':          'Marketing Channel',
+    'lead source':                'Lead Source',
+    'weekend':                    'Weekend/PH',
+    'weekend?':                   'Weekend/PH',
+    'weekend/ph':                 'Weekend/PH',
+    'weekend / ph':               'Weekend/PH',
+    'rate':                       'Rate',
+    'brand':                      'Brand',
+    'email':                      '_EMAIL_',
+    'email address':              '_EMAIL_',
+    'e-mail':                     '_EMAIL_',
+    'first name':                 '_FIRST_',
+    'last name':                  '_LAST_',
+  };
+
+  const KNOWN_HEADERS = new Set([
+    'photographer','designer','sales representative','user name',
+    'ranking','session date','session no','session number','client',
+    'client name','location','invoice location number','session location number',
+    'session type','marketing channel','lead source','weekend','weekend?',
+    'weekend/ph','rate','brand','email','email address','apptmt date',
+    'appointment date','inv date','invoice date','invoice no','invoice number',
+    'inv number','first name','last name',
+  ]);
+
+  // ── Location code mapping ─────────────────────────────────────────
+  const LOCATION_CODES = {
+    '100': 'Verve Portraits - Alexandria',
+    '102': 'Verve Portraits - Richmond',
+    '107': 'Verve Portraits - Fortitude Valley',
+    '120': 'Verve Intimate - South Melbourne',
+    '121': 'Verve Intimate - Surry Hills',
+    '122': 'Verve Intimate - Fortitude Valley',
+  };
+
+  function resolveLocation(rawLocation, sessionNo) {
+    const loc = String(rawLocation || '').trim();
+    // If it's a 3-digit numeric code, resolve it
+    if (/^\d{2,3}$/.test(loc) && LOCATION_CODES[loc]) return LOCATION_CODES[loc];
+    // If it already contains a studio name, leave as-is
+    if (loc && !/^\d+$/.test(loc)) return loc;
+    // Derive from session number's first 3 digits
+    const sn = String(sessionNo || '').trim();
+    if (sn.length >= 3) {
+      const prefix = sn.substring(0, 3);
+      if (LOCATION_CODES[prefix]) return LOCATION_CODES[prefix];
+    }
+    return loc;
+  }
+
+  function detectBrandFromLocation(location) {
+    const loc = String(location || '').toLowerCase();
+    if (loc.includes('intimate')) return 'Intimate';
+    if (loc.includes('portrait')) return 'Family';
+    return '';
+  }
+
+  // ── Ranking normalisation ─────────────────────────────────────────
+  const RANKING_ALIASES = { 'elevate': 'Elite' };
+
+  const PRICE_TABLE = {
+    'Platinum': { wd: 250, we: 300 },
+    'Crystal':  { wd: 225, we: 275 },
+    'Elite':    { wd: 200, we: 250 },
+    'Gold':     { wd: 175, we: 225 },
+    'Silver':   { wd: 150, we: 200 },
+    'Bronze':   { wd: 125, we: 175 },
+  };
+  const NOSHOW_FLAT = { wd: 62.50, we: 87.50 };
+
+  // Multiplier types — only for Family brand
+  const UPLIFT_TYPES = new Set(['10+', 'newborn']);
+  const UPLIFT_FACTOR = 1.5;
+
+  function normalizeRanking(raw) {
+    const s = (raw || '').toString().trim();
+    if (!s) return '';
+    const lower = s.toLowerCase();
+    if (RANKING_ALIASES[lower]) return RANKING_ALIASES[lower];
+    // Title-case the first letter
+    return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+  }
+
+  // ── Output column templates ───────────────────────────────────────
+  // These define the EXACT column order for every output file.
+  // Change #7: No Show columns match Eligible column order.
+  // Change #8: Designer uses "design" language (except Session Number stays).
+  // Change #9: Designer No Show uses "Appointment Date" / "Session Number".
+
+  const PHOTO_ELIGIBLE_COLS = ['Ranking', 'Session Date', 'Session No', 'Client', 'Location', 'Session Type', 'Marketing Channel', 'Weekend/PH', 'Rate'];
+  const PHOTO_NOSHOW_COLS  = ['Ranking', 'Session Date', 'Session No', 'Client', 'Location', 'Session Type', 'Marketing Channel', 'Weekend/PH', 'Rate'];
+
+  const DESIGN_ELIGIBLE_COLS = ['Ranking', 'Appointment Date', 'Session No', 'Client', 'Location', 'Session Type', 'Marketing Channel', 'Weekend/PH', 'Rate'];
+  const DESIGN_NOSHOW_COLS  = ['Ranking', 'Appointment Date', 'Session Number', 'Client', 'Location', 'Session Type', 'Marketing Channel', 'Weekend/PH', 'Rate'];
+
+  // ── State ─────────────────────────────────────────────────────────
   const state = {
     files: { photoEligible: null, photoNoShow: null, designEligible: null, designNoShow: null, contacts: null },
     parsedData: { photoEligible: [], photoNoShow: [], designEligible: [], designNoShow: [] },
     headers: { photoEligible: [], photoNoShow: [], designEligible: [], designNoShow: [] },
-    contactMap: {},   // { normalisedName: { name, email, source } }
+    contactMap: {},
     manifest: [],
+    corrections: [],  // rate corrections log
+    rankingOverrides: [],  // Elevate ranking override log
   };
 
   const SKIP_NAMES = new Set(['assign photographer', 'assign designer', 'total']);
-  const NUMERIC_COLUMNS = new Set(['rate', 'session no', 'invoice no']);
-  const DATE_COLUMNS = new Set(['session date', 'invoice date', 'appointment date']);
+  const SECTION_MARKERS = {
+    ELIGIBLE_PHOTO: /eligible\s+(photography\s+)?sessions?/i,
+    NOSHOW_PHOTO:   /no\s*show\s+(photography\s+)?sessions?/i,
+    ELIGIBLE_DESIGN: /eligible\s+(design\s+)?appointments?/i,
+    NOSHOW_DESIGN:  /no\s*show\s+(design\s+)?appointments?/i,
+  };
+  const TOTAL_ROW = /^total:\s*\d+/i;
+  const PLACEHOLDER_ROW = /^no (eligible|no[- ]?show) (sessions?|designs?|appointments?) this period$/i;
+
+  const DATE_COLUMNS = new Set(['session date', 'appointment date', 'inv date', 'invoice date', 'apptmt date']);
   const LS_KEY = 'verve-portal-contacts';
+  const ELEVATE_URL_KEY = 'verve-portal-elevate-url';
 
   const $ = s => document.querySelector(s);
   const $$ = s => document.querySelectorAll(s);
   const norm = s => (s || '').toString().trim().toLowerCase();
 
-  // ── localStorage contacts ──────────────────────────────────────────
-  function loadSavedContacts() {
-    try {
-      const raw = localStorage.getItem(LS_KEY);
-      return raw ? JSON.parse(raw) : {};
-    } catch { return {}; }
+  // ── Elevate rankings integration ──────────────────────────────────
+  let elevateRankings = null;  // { rankings: { name: { family, intimate } }, periodLabel }
+  let elevateConnected = false;
+  let elevatePeriodsList = [];  // [{ periodNumber, label }, ...] newest first
+
+  function loadElevateUrl() {
+    return localStorage.getItem(ELEVATE_URL_KEY) || '';
+  }
+  function saveElevateUrl(url) {
+    localStorage.setItem(ELEVATE_URL_KEY, url.replace(/\/+$/, ''));
   }
 
+  async function fetchElevateRankings(baseUrl, periodNumber) {
+    let url = baseUrl.replace(/\/+$/, '') + '/api/rankings';
+    if (periodNumber) url += `?period=${encodeURIComponent(periodNumber)}`;
+    const resp = await fetch(url);
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => ({}));
+      throw new Error(body.error || `HTTP ${resp.status}`);
+    }
+    return resp.json();
+  }
+
+  async function fetchElevatePeriodsList(baseUrl) {
+    const url = baseUrl.replace(/\/+$/, '') + '/api/rankings?list=1';
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    return Array.isArray(data.periods) ? data.periods : [];
+  }
+
+  function populatePeriodDropdown(periods, selectedPeriodNumber) {
+    const select = $('#elevatePeriod');
+    select.innerHTML = '';
+    if (!periods.length) {
+      select.innerHTML = '<option value="">No periods available</option>';
+      select.disabled = true;
+      return;
+    }
+    for (const p of periods) {
+      const opt = document.createElement('option');
+      opt.value = p.periodNumber;
+      opt.textContent = p.label;
+      select.appendChild(opt);
+    }
+    select.disabled = false;
+    if (selectedPeriodNumber) select.value = String(selectedPeriodNumber);
+  }
+
+  async function testElevateConnection() {
+    const urlInput = $('#elevateUrl');
+    const result = $('#elevateTestResult');
+    const btn = $('#btnTestElevate');
+    const url = urlInput.value.trim();
+    if (!url) { result.textContent = 'Enter a URL first'; result.className = 'elevate-test-result error'; return; }
+
+    btn.disabled = true; btn.textContent = 'Testing…';
+    result.textContent = ''; result.className = 'elevate-test-result';
+
+    try {
+      // Fetch the period list first so the dropdown shows options
+      elevatePeriodsList = await fetchElevatePeriodsList(url);
+      const data = await fetchElevateRankings(url);  // latest, to confirm + get default period
+      const count = Object.keys(data.rankings || {}).length;
+      saveElevateUrl(url);
+      elevateRankings = data;
+      elevateConnected = true;
+      populatePeriodDropdown(elevatePeriodsList, data.periodNumber);
+      result.textContent = `Connected — ${count} contractor${count !== 1 ? 's' : ''} from ${data.periodLabel || 'latest period'}`;
+      result.className = 'elevate-test-result success';
+      updateElevateStatus();
+    } catch (err) {
+      elevateConnected = false;
+      result.textContent = `Failed: ${err.message}`;
+      result.className = 'elevate-test-result error';
+      updateElevateStatus();
+    } finally {
+      btn.disabled = false; btn.textContent = 'Test Connection';
+    }
+  }
+
+  async function onPeriodChange() {
+    const select = $('#elevatePeriod');
+    const periodNumber = select.value;
+    const url = loadElevateUrl();
+    if (!url || !periodNumber) return;
+
+    const result = $('#elevateTestResult');
+    result.textContent = 'Loading period…';
+    result.className = 'elevate-test-result';
+
+    try {
+      const data = await fetchElevateRankings(url, periodNumber);
+      const count = Object.keys(data.rankings || {}).length;
+      elevateRankings = data;
+      elevateConnected = true;
+      result.textContent = `Using ${count} contractor${count !== 1 ? 's' : ''} from ${data.periodLabel}`;
+      result.className = 'elevate-test-result success';
+      updateElevateStatus();
+    } catch (err) {
+      result.textContent = `Failed to load period: ${err.message}`;
+      result.className = 'elevate-test-result error';
+    }
+  }
+
+  function updateElevateStatus() {
+    const statusEl = $('#elevateStatus');
+    if (elevateConnected && elevateRankings) {
+      const count = Object.keys(elevateRankings.rankings || {}).length;
+      statusEl.textContent = `Connected (${count})`;
+      statusEl.classList.add('connected');
+    } else {
+      statusEl.textContent = 'Not connected';
+      statusEl.classList.remove('connected');
+    }
+  }
+
+  function lookupElevateRanking(contractorName, brand) {
+    if (!elevateRankings || !elevateRankings.rankings) return null;
+    const key = norm(contractorName);
+    const entry = elevateRankings.rankings[key];
+    if (!entry) return null;
+    const b = (brand || '').toLowerCase();
+    if (b === 'family') return entry.family || null;
+    if (b === 'intimate') return entry.intimate || null;
+    // If no brand detected, try family first then intimate
+    return entry.family || entry.intimate || null;
+  }
+
+  function initElevateUI() {
+    // Load saved URL
+    const savedUrl = loadElevateUrl();
+    if (savedUrl) $('#elevateUrl').value = savedUrl;
+
+    // Toggle panel
+    $('#elevateToggle').addEventListener('click', () => {
+      const body = $('#elevateBody');
+      const chevron = $('#elevateChevron');
+      body.classList.toggle('hidden');
+      chevron.classList.toggle('open');
+    });
+
+    // Test button
+    $('#btnTestElevate').addEventListener('click', testElevateConnection);
+
+    // Period dropdown change
+    $('#elevatePeriod').addEventListener('change', onPeriodChange);
+
+    // Auto-connect if we have a saved URL
+    if (savedUrl) {
+      Promise.all([
+        fetchElevateRankings(savedUrl),
+        fetchElevatePeriodsList(savedUrl),
+      ]).then(([data, periods]) => {
+        elevateRankings = data;
+        elevateConnected = true;
+        elevatePeriodsList = periods;
+        populatePeriodDropdown(periods, data.periodNumber);
+        updateElevateStatus();
+      }).catch(() => {});
+    }
+  }
+
+  // ── localStorage contacts ─────────────────────────────────────────
+  function loadSavedContacts() {
+    try { const raw = localStorage.getItem(LS_KEY); return raw ? JSON.parse(raw) : {}; }
+    catch { return {}; }
+  }
   function saveContactsToLS(map) {
     try { localStorage.setItem(LS_KEY, JSON.stringify(map)); } catch {}
   }
-
   function mergeContacts(...sources) {
-    // Later sources override earlier ones. Each entry: { name, email, source }
     const merged = {};
     for (const src of sources) {
       for (const [k, v] of Object.entries(src)) {
@@ -45,26 +335,21 @@
     }
     return merged;
   }
-
   function showSavedContactCount() {
     const saved = loadSavedContacts();
     const count = Object.keys(saved).length;
     const note = $('#contactsMemoryNote');
-    if (count > 0) {
-      note.textContent = `${count} saved email${count !== 1 ? 's' : ''} remembered from last time`;
-    } else {
-      note.textContent = '';
-    }
+    if (count > 0) note.textContent = `${count} saved email${count !== 1 ? 's' : ''} remembered from last time`;
+    else note.textContent = '';
   }
 
-  // ── Date helpers ───────────────────────────────────────────────────
+  // ── Date helpers ──────────────────────────────────────────────────
   function excelDateToJS(serial) {
     if (serial instanceof Date) return serial;
     if (typeof serial === 'number') return new Date((serial - 25569) * 86400000);
     const parsed = new Date(serial);
     return isNaN(parsed) ? serial : parsed;
   }
-
   function fmtDate(val) {
     const d = excelDateToJS(val);
     if (!(d instanceof Date) || isNaN(d)) return val || '';
@@ -73,7 +358,7 @@
     return `${dd}-${mmm}-${d.getUTCFullYear()}`;
   }
 
-  // ── File upload handling ───────────────────────────────────────────
+  // ── File upload handling ──────────────────────────────────────────
   function initUploads() {
     $$('.upload-zone').forEach(zone => {
       const input = zone.querySelector('input[type="file"]');
@@ -88,14 +373,12 @@
       input.addEventListener('change', () => { if (input.files.length) handleFile(key, input.files[0], zone); });
     });
   }
-
   function handleFile(key, file, zone) {
     state.files[key] = file;
     zone.classList.add('loaded');
     zone.querySelector('.zone-status').textContent = file.name;
     updateProcessButton();
   }
-
   function updateProcessButton() {
     const hasData = state.files.photoEligible || state.files.photoNoShow || state.files.designEligible || state.files.designNoShow;
     $('#btnProcess').disabled = !hasData;
@@ -108,23 +391,15 @@
     $('#uploadSummary').textContent = parts.length ? `${parts.length} file(s) loaded` : '';
   }
 
-  // ── Parse Excel ────────────────────────────────────────────────────
-  function readExcel(file) {
+  // ── Parse Excel ───────────────────────────────────────────────────
+  function readExcelRaw(file) {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = e => {
         try {
           const wb = XLSX.read(e.target.result, { type: 'array', cellDates: false, raw: true });
           const ws = wb.Sheets[wb.SheetNames[0]];
-          const rows = XLSX.utils.sheet_to_json(ws, { defval: '', raw: true });
-          for (const row of rows) {
-            for (const key of Object.keys(row)) {
-              const kl = key.toLowerCase();
-              if (row[key] instanceof Date && !DATE_COLUMNS.has(kl)) {
-                row[key] = Math.round(((row[key].getTime() / 86400000) + 25569) * 100) / 100;
-              }
-            }
-          }
+          const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: true });
           resolve(rows);
         } catch (err) { reject(err); }
       };
@@ -133,106 +408,440 @@
     });
   }
 
-  function extractHeaders(rows) { return rows.length ? Object.keys(rows[0]) : []; }
-
-  function filterRows(rows, nameCol) {
-    return rows.filter(r => {
-      const name = norm(r[nameCol]);
-      return name && !SKIP_NAMES.has(name) && !name.startsWith('applied filter');
-    });
-  }
-
-  function getNameColumn(headers) {
-    for (const h of headers) {
-      const lc = h.toLowerCase();
-      if (lc === 'photographer' || lc === 'designer') return h;
+  // ── Find header row ───────────────────────────────────────────────
+  // Scans first 15 rows for the one with the most recognised column names.
+  function findHeaderRow(rawRows) {
+    let bestIdx = 0, bestScore = 0;
+    const limit = Math.min(rawRows.length, 15);
+    for (let i = 0; i < limit; i++) {
+      const row = rawRows[i];
+      if (!Array.isArray(row)) continue;
+      let score = 0;
+      for (const cell of row) {
+        const v = norm(cell);
+        if (KNOWN_HEADERS.has(v)) score++;
+      }
+      if (score > bestScore) { bestScore = score; bestIdx = i; }
     }
-    return headers[0];
+    return { idx: bestIdx, score: bestScore };
   }
 
-  function parseContacts(rows) {
+  // ── Normalise columns ────────────────────────────────────────────
+  // Takes raw header row → builds { standardName: originalIdx } mapping.
+  function buildColumnMap(headerRow) {
     const map = {};
-    if (!rows.length) return map;
-    const headers = Object.keys(rows[0]);
-    let nameCol = null, emailCol = null;
-    for (const h of headers) {
-      const lc = h.toLowerCase();
-      if (!nameCol && (lc.includes('name') || lc === 'photographer' || lc === 'designer' || lc === 'contractor')) nameCol = h;
-      if (!emailCol && (lc.includes('email') || lc.includes('e-mail'))) emailCol = h;
+    const nameIndices = [];
+    let firstIdx = -1, lastIdx = -1;
+
+    for (let i = 0; i < headerRow.length; i++) {
+      const raw = (headerRow[i] || '').toString().trim();
+      if (!raw) continue;
+      const lower = raw.toLowerCase();
+      const mapped = COLUMN_RENAME_MAP[lower];
+      if (mapped === '_NAME_') {
+        nameIndices.push(i);
+      } else if (mapped === '_EMAIL_') {
+        map['_EMAIL_'] = i;
+      } else if (mapped === '_FIRST_') {
+        firstIdx = i;
+      } else if (mapped === '_LAST_') {
+        lastIdx = i;
+      } else if (mapped) {
+        map[mapped] = i;
+      } else {
+        // Pass through unrecognised columns with original name
+        map[raw] = i;
+      }
     }
-    if (!nameCol) nameCol = headers[0];
-    if (!emailCol) emailCol = headers.length > 1 ? headers[1] : null;
-    if (!emailCol) return map;
-    for (const r of rows) {
-      const name = (r[nameCol] || '').toString().trim();
-      const email = (r[emailCol] || '').toString().trim();
-      if (name && email) map[norm(name)] = { name, email, source: 'uploaded' };
+    // Name column: prefer explicit mapping
+    if (nameIndices.length > 0) map['_NAME_'] = nameIndices[0];
+    // First + Last → Client
+    if (firstIdx >= 0 && lastIdx >= 0) {
+      map['_FIRST_'] = firstIdx;
+      map['_LAST_'] = lastIdx;
     }
     return map;
   }
 
-  function groupByName(rows, nameCol) {
+  function extractRowValue(row, colMap, colName) {
+    if (colName === 'Client' && '_FIRST_' in colMap && '_LAST_' in colMap) {
+      const f = (row[colMap['_FIRST_']] || '').toString().trim();
+      const l = (row[colMap['_LAST_']] || '').toString().trim();
+      if (f || l) return `${f} ${l}`.trim();
+    }
+    const idx = colMap[colName];
+    if (idx === undefined) return '';
+    return row[idx];
+  }
+
+  // ── Detect new sectioned format ───────────────────────────────────
+  // The new Finance format has contractor sections with embedded headers:
+  //   Row: "ELIGIBLE PHOTOGRAPHY SESSIONS" (section marker)
+  //   Row: column headers
+  //   Rows: data
+  //   Row: "Total: N sessions"
+  //   blank rows
+  //   Row: "NO SHOW PHOTOGRAPHY SESSIONS"
+  //   Row: column headers
+  //   Rows: data
+  //   Row: "Total: N sessions"
+  //
+  // Multiple contractors may appear in one file, separated by these markers.
+
+  function isSectionMarker(row) {
+    const first = norm(row[0] || '');
+    for (const rx of Object.values(SECTION_MARKERS)) {
+      if (rx.test(first)) return true;
+    }
+    return false;
+  }
+
+  function getSectionType(text) {
+    const s = (text || '').toString().trim();
+    if (SECTION_MARKERS.ELIGIBLE_PHOTO.test(s)) return 'photoEligible';
+    if (SECTION_MARKERS.NOSHOW_PHOTO.test(s)) return 'photoNoShow';
+    if (SECTION_MARKERS.ELIGIBLE_DESIGN.test(s)) return 'designEligible';
+    if (SECTION_MARKERS.NOSHOW_DESIGN.test(s)) return 'designNoShow';
+    return null;
+  }
+
+  function detectSectionedFormat(rawRows) {
+    let sectionCount = 0;
+    for (const row of rawRows) {
+      if (Array.isArray(row) && row.length > 0 && isSectionMarker(row)) sectionCount++;
+      if (sectionCount >= 2) return true;
+    }
+    return false;
+  }
+
+  // ── Parse sectioned file ──────────────────────────────────────────
+  function parseSectionedFile(rawRows) {
+    const result = {
+      photoEligible: [], photoNoShow: [],
+      designEligible: [], designNoShow: [],
+      headers: { photoEligible: [], photoNoShow: [], designEligible: [], designNoShow: [] },
+      emails: {},
+    };
+    let currentSection = null;
+    let currentColMap = null;
+    let expectHeaders = false;
+
+    for (let i = 0; i < rawRows.length; i++) {
+      const row = rawRows[i];
+      if (!Array.isArray(row) || row.length === 0) { continue; }
+
+      const firstCell = (row[0] || '').toString().trim();
+
+      // Check for section marker
+      const sType = getSectionType(firstCell);
+      if (sType) {
+        currentSection = sType;
+        expectHeaders = true;
+        currentColMap = null;
+        continue;
+      }
+
+      // Check for total row or placeholder
+      if (TOTAL_ROW.test(firstCell) || PLACEHOLDER_ROW.test(firstCell)) {
+        currentSection = null;
+        currentColMap = null;
+        continue;
+      }
+
+      // If we're expecting headers for this section, check this row
+      if (expectHeaders && currentSection) {
+        const testScore = row.reduce((sc, cell) => sc + (KNOWN_HEADERS.has(norm(cell)) ? 1 : 0), 0);
+        if (testScore >= 3) {
+          currentColMap = buildColumnMap(row);
+          // Store headers for this section (using the standard output template)
+          expectHeaders = false;
+          continue;
+        }
+      }
+
+      // If we have a section and column map, this is a data row
+      if (currentSection && currentColMap) {
+        const nameIdx = currentColMap['_NAME_'];
+        const name = nameIdx !== undefined ? (row[nameIdx] || '').toString().trim() : '';
+        const nName = norm(name);
+        if (!name || SKIP_NAMES.has(nName) || nName.startsWith('applied filter')) continue;
+
+        // Build normalised row object
+        const obj = {};
+        obj['_name'] = name;
+
+        const isDesigner = currentSection.startsWith('design');
+        const isNoShow = currentSection.includes('NoShow');
+
+        // Get the right template columns
+        let templateCols;
+        if (isDesigner) templateCols = isNoShow ? DESIGN_NOSHOW_COLS : DESIGN_ELIGIBLE_COLS;
+        else templateCols = isNoShow ? PHOTO_NOSHOW_COLS : PHOTO_ELIGIBLE_COLS;
+
+        for (const col of templateCols) {
+          let val = extractRowValue(row, currentColMap, col);
+
+          // Session No ↔ Session Number mapping (same data, different header)
+          if (val === '' || val === undefined) {
+            if (col === 'Session No') val = extractRowValue(row, currentColMap, 'Session Number');
+            if (col === 'Session Number') val = extractRowValue(row, currentColMap, 'Session No');
+          }
+          // Appointment Date ↔ Session Date mapping
+          if (val === '' || val === undefined) {
+            if (col === 'Appointment Date') val = extractRowValue(row, currentColMap, 'Session Date');
+            if (col === 'Session Date') val = extractRowValue(row, currentColMap, 'Appointment Date');
+          }
+          obj[col] = val;
+        }
+
+        // Normalise ranking (Elevate → Elite)
+        if (obj['Ranking']) obj['Ranking'] = normalizeRanking(obj['Ranking']);
+
+        // Resolve location codes
+        const sessionNoVal = obj['Session No'] || obj['Session Number'] || '';
+        obj['Location'] = resolveLocation(obj['Location'], sessionNoVal);
+
+        // Detect brand from location if not already present
+        if (!obj['Brand']) obj['Brand'] = detectBrandFromLocation(obj['Location']);
+
+        // Rate corrections
+        applyRateCorrections(obj, name, isNoShow, isDesigner);
+
+        // Extract email if present
+        const emailIdx = currentColMap['_EMAIL_'];
+        if (emailIdx !== undefined) {
+          const email = (row[emailIdx] || '').toString().trim();
+          if (email && email.includes('@')) {
+            result.emails[norm(name)] = { name, email, source: 'data' };
+          }
+        }
+
+        result[currentSection].push(obj);
+      }
+    }
+
+    // Build headers from template columns
+    result.headers.photoEligible = PHOTO_ELIGIBLE_COLS;
+    result.headers.photoNoShow = PHOTO_NOSHOW_COLS;
+    result.headers.designEligible = DESIGN_ELIGIBLE_COLS;
+    result.headers.designNoShow = DESIGN_NOSHOW_COLS;
+
+    return result;
+  }
+
+  // ── Parse flat (old) format ───────────────────────────────────────
+  function parseFlatFile(rawRows, role, type) {
+    const { idx: headerIdx } = findHeaderRow(rawRows);
+    const headerRow = rawRows[headerIdx];
+    const colMap = buildColumnMap(headerRow);
+
+    const isDesigner = role === 'designer';
+    const isNoShow = type === 'noShow';
+    let templateCols;
+    if (isDesigner) templateCols = isNoShow ? DESIGN_NOSHOW_COLS : DESIGN_ELIGIBLE_COLS;
+    else templateCols = isNoShow ? PHOTO_NOSHOW_COLS : PHOTO_ELIGIBLE_COLS;
+
+    const rows = [];
+    const emails = {};
+
+    for (let i = headerIdx + 1; i < rawRows.length; i++) {
+      const row = rawRows[i];
+      if (!Array.isArray(row) || row.length === 0) continue;
+
+      // Skip mid-file re-headers
+      const firstCell = norm(row[0] || '');
+      if (isSectionMarker([row[0]])) continue;
+      if (TOTAL_ROW.test(firstCell) || PLACEHOLDER_ROW.test(firstCell)) continue;
+
+      const nameIdx = colMap['_NAME_'];
+      const name = nameIdx !== undefined ? (row[nameIdx] || '').toString().trim() : '';
+      const nName = norm(name);
+      if (!name || SKIP_NAMES.has(nName) || nName.startsWith('applied filter')) continue;
+
+      const obj = {};
+      obj['_name'] = name;
+
+      for (const col of templateCols) {
+        let val = extractRowValue(row, colMap, col);
+        if (val === '' || val === undefined) {
+          if (col === 'Session No') val = extractRowValue(row, colMap, 'Session Number');
+          if (col === 'Session Number') val = extractRowValue(row, colMap, 'Session No');
+          if (col === 'Appointment Date') val = extractRowValue(row, colMap, 'Session Date');
+          if (col === 'Session Date') val = extractRowValue(row, colMap, 'Appointment Date');
+        }
+        obj[col] = val;
+      }
+
+      if (obj['Ranking']) obj['Ranking'] = normalizeRanking(obj['Ranking']);
+      const sessionNoVal = obj['Session No'] || obj['Session Number'] || '';
+      obj['Location'] = resolveLocation(obj['Location'], sessionNoVal);
+      if (!obj['Brand']) obj['Brand'] = detectBrandFromLocation(obj['Location']);
+
+      applyRateCorrections(obj, name, isNoShow, isDesigner);
+
+      // Extract email
+      const emailIdx = colMap['_EMAIL_'];
+      if (emailIdx !== undefined) {
+        const email = (row[emailIdx] || '').toString().trim();
+        if (email && email.includes('@')) emails[norm(name)] = { name, email, source: 'data' };
+      }
+
+      rows.push(obj);
+    }
+
+    return { rows, headers: templateCols, emails };
+  }
+
+  // ── Rate corrections ──────────────────────────────────────────────
+  // Change #4: ×1.5 uplift for 10+/Newborn when Finance misses it
+  // Change #6: No-show flat rate $62.50/$87.50 independent of ranking
+  function applyRateCorrections(obj, contractorName, isNoShow, isDesigner) {
+    const rateRaw = obj['Rate'];
+    const rate = parseFloat(rateRaw);
+    const ranking = obj['Ranking'] || '';
+    const isWeekend = isTruthyYes(obj['Weekend/PH']);
+    const sessionType = (obj['Session Type'] || '').toString().trim().toLowerCase();
+    const brand = (obj['Brand'] || '').toString().trim().toLowerCase();
+
+    if (isNoShow) {
+      // Change #6: No-show is always flat rate, independent of ranking
+      const expectedRate = isWeekend ? NOSHOW_FLAT.we : NOSHOW_FLAT.wd;
+      if (!isNaN(rate) && rate !== expectedRate) {
+        state.corrections.push({
+          name: contractorName, type: 'no-show-rate',
+          msg: `No-show rate corrected from $${rate.toFixed(2)} to $${expectedRate.toFixed(2)} (flat rate)`,
+        });
+      }
+      obj['Rate'] = expectedRate;
+      return;
+    }
+
+    // Change #4: ×1.5 uplift for Family 10+/Newborn
+    if (!isDesigner && ranking && PRICE_TABLE[ranking] && UPLIFT_TYPES.has(sessionType) && brand === 'family') {
+      const baseRate = isWeekend ? PRICE_TABLE[ranking].we : PRICE_TABLE[ranking].wd;
+      const expectedRate = baseRate * UPLIFT_FACTOR;
+      if (!isNaN(rate) && rate > 0 && Math.abs(rate - expectedRate) > 0.01 && rate < expectedRate) {
+        state.corrections.push({
+          name: contractorName, type: 'uplift-correction',
+          msg: `${sessionType} rate corrected from $${rate.toFixed(2)} to $${expectedRate.toFixed(2)} (×1.5 uplift)`,
+        });
+        obj['Rate'] = expectedRate;
+      } else if (isNaN(rate) || rate === 0 || rate === '') {
+        obj['Rate'] = expectedRate;
+      }
+    }
+  }
+
+  function isTruthyYes(val) {
+    if (!val) return false;
+    const s = val.toString().trim().toLowerCase();
+    return s === 'yes' || s === 'y' || s === 'true' || s === '1';
+  }
+
+  // ── Contact parsing ───────────────────────────────────────────────
+  function parseContacts(rawRows) {
+    const { idx: headerIdx } = findHeaderRow(rawRows);
+    const headerRow = rawRows[headerIdx];
+    const colMap = buildColumnMap(headerRow);
+    const map = {};
+    const nameIdx = colMap['_NAME_'];
+    const emailIdx = colMap['_EMAIL_'];
+    if (nameIdx === undefined || emailIdx === undefined) {
+      // Fallback: first two columns
+      for (let i = headerIdx + 1; i < rawRows.length; i++) {
+        const row = rawRows[i];
+        if (!Array.isArray(row)) continue;
+        const name = (row[0] || '').toString().trim();
+        const email = (row[1] || '').toString().trim();
+        if (name && email && email.includes('@')) map[norm(name)] = { name, email, source: 'uploaded' };
+      }
+      return map;
+    }
+    for (let i = headerIdx + 1; i < rawRows.length; i++) {
+      const row = rawRows[i];
+      if (!Array.isArray(row)) continue;
+      const name = (row[nameIdx] || '').toString().trim();
+      const email = (row[emailIdx] || '').toString().trim();
+      if (name && email && email.includes('@')) map[norm(name)] = { name, email, source: 'uploaded' };
+    }
+    return map;
+  }
+
+  function getNameFromRow(obj) { return obj['_name'] || ''; }
+
+  function groupByName(rows) {
     const groups = {};
     for (const row of rows) {
-      const name = (row[nameCol] || '').toString().trim();
+      const name = getNameFromRow(row);
       if (!groups[name]) groups[name] = [];
       groups[name].push(row);
     }
     return groups;
   }
 
-  // ── Excel generation ───────────────────────────────────────────────
+  // ── Excel generation ──────────────────────────────────────────────
   const COLORS = {
     eligible: { title: { bg: '3D5A47', fg: 'FFFFFF' }, header: { bg: '5A7D66', fg: 'FFFFFF' }, altRow: 'EFF5F1' },
     noShow:   { title: { bg: '8B3A3A', fg: 'FFFFFF' }, header: { bg: 'A85555', fg: 'FFFFFF' }, altRow: 'F5EAEA' },
   };
 
-  async function generateContractorFile(name, role, eligibleRows, noShowRows, eligibleHeaders, noShowHeaders, periodLabel) {
+  async function generateContractorFile(name, role, eligibleRows, noShowRows, eligibleCols, noShowCols, periodLabel) {
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet(name);
-    const nameCol = role === 'photographer' ? 'Photographer' : 'Designer';
-    const eligCols = eligibleHeaders.filter(h => h !== nameCol);
-    const nsCols = noShowHeaders.filter(h => h !== nameCol);
-    const maxCols = Math.max(eligCols.length, nsCols.length, 4);
+    const maxCols = Math.max(eligibleCols.length, noShowCols.length, 4);
     ws.columns = Array.from({ length: maxCols }, () => ({ width: 22 }));
 
     let rowIdx = 1;
+    // Title row
     const titleRow = ws.getRow(rowIdx);
     titleRow.getCell(1).value = periodLabel ? `${name} — ${periodLabel}` : name;
     titleRow.getCell(1).font = { bold: true, size: 14, color: { argb: '1A1A1A' } };
     titleRow.height = 28;
     ws.mergeCells(rowIdx, 1, rowIdx, maxCols);
     rowIdx++;
+    // Role row
     const roleRow = ws.getRow(rowIdx);
     roleRow.getCell(1).value = role === 'photographer' ? 'Photographer' : 'Designer';
     roleRow.getCell(1).font = { size: 10, color: { argb: '6B6B6B' }, italic: true };
     rowIdx += 2;
 
+    // Change #8: Designer uses "design" instead of "session"
     const eligTitle = role === 'photographer' ? 'ELIGIBLE PHOTOGRAPHY SESSIONS' : 'ELIGIBLE DESIGN APPOINTMENTS';
     rowIdx = writeSectionTitle(ws, rowIdx, eligTitle, COLORS.eligible.title, maxCols);
-    rowIdx = writeHeaders(ws, rowIdx, eligCols, COLORS.eligible.header);
+    rowIdx = writeHeaders(ws, rowIdx, eligibleCols, COLORS.eligible.header);
     if (!eligibleRows.length) {
-      const r = ws.getRow(rowIdx); r.getCell(1).value = 'No eligible sessions this period';
+      const r = ws.getRow(rowIdx);
+      r.getCell(1).value = role === 'photographer' ? 'No eligible sessions this period' : 'No eligible designs this period';
       r.getCell(1).font = { italic: true, color: { argb: '6B6B6B' } };
-      ws.mergeCells(rowIdx, 1, rowIdx, eligCols.length || maxCols); rowIdx++;
+      ws.mergeCells(rowIdx, 1, rowIdx, eligibleCols.length || maxCols); rowIdx++;
     } else {
       for (let i = 0; i < eligibleRows.length; i++)
-        rowIdx = writeDataRow(ws, rowIdx, eligibleRows[i], eligCols, i % 2 === 1 ? COLORS.eligible.altRow : null);
-      rowIdx = writeTotalRow(ws, rowIdx, eligibleRows, eligCols);
+        rowIdx = writeDataRow(ws, rowIdx, eligibleRows[i], eligibleCols, i % 2 === 1 ? COLORS.eligible.altRow : null);
+      rowIdx = writeTotalRow(ws, rowIdx, eligibleRows, eligibleCols, role);
     }
     rowIdx += 2;
 
+    // Change #8: Designer no-show section title
     const nsTitle = role === 'photographer' ? 'NO SHOW PHOTOGRAPHY SESSIONS' : 'NO SHOW DESIGN APPOINTMENTS';
     rowIdx = writeSectionTitle(ws, rowIdx, nsTitle, COLORS.noShow.title, maxCols);
-    rowIdx = writeHeaders(ws, rowIdx, nsCols, COLORS.noShow.header);
+
+    // Change #6: Flat rate hint for no-show section
+    const hintRow = ws.getRow(rowIdx);
+    hintRow.getCell(1).value = 'Flat rate: $62.50 weekday / $87.50 weekend or public holiday (ranking does not apply)';
+    hintRow.getCell(1).font = { italic: true, size: 8, color: { argb: '8B3A3A' } };
+    ws.mergeCells(rowIdx, 1, rowIdx, maxCols);
+    rowIdx++;
+
+    rowIdx = writeHeaders(ws, rowIdx, noShowCols, COLORS.noShow.header);
     if (!noShowRows.length) {
-      const r = ws.getRow(rowIdx); r.getCell(1).value = 'No no-show sessions this period';
+      const r = ws.getRow(rowIdx);
+      r.getCell(1).value = role === 'photographer' ? 'No no-show sessions this period' : 'No no-show designs this period';
       r.getCell(1).font = { italic: true, color: { argb: '6B6B6B' } };
-      ws.mergeCells(rowIdx, 1, rowIdx, nsCols.length || maxCols); rowIdx++;
+      ws.mergeCells(rowIdx, 1, rowIdx, noShowCols.length || maxCols); rowIdx++;
     } else {
       for (let i = 0; i < noShowRows.length; i++)
-        rowIdx = writeDataRow(ws, rowIdx, noShowRows[i], nsCols, i % 2 === 1 ? COLORS.noShow.altRow : null);
-      rowIdx = writeTotalRow(ws, rowIdx, noShowRows, nsCols);
+        rowIdx = writeDataRow(ws, rowIdx, noShowRows[i], noShowCols, i % 2 === 1 ? COLORS.noShow.altRow : null);
+      rowIdx = writeTotalRow(ws, rowIdx, noShowRows, noShowCols, role);
     }
 
     const buffer = await wb.xlsx.writeBuffer();
@@ -270,16 +879,28 @@
       const cell = row.getCell(i + 1);
       let val = dataRow[cols[i]];
       const colLower = cols[i].toLowerCase();
-      if (NUMERIC_COLUMNS.has(colLower) && val != null && val !== '') {
+
+      // Format rate as number
+      if (colLower === 'rate' && val != null && val !== '') {
         if (val instanceof Date) val = Math.round(((val.getTime() / 86400000) + 25569) * 100) / 100;
         else { const num = parseFloat(val); if (!isNaN(num)) val = num; }
-      } else if (DATE_COLUMNS.has(colLower) && val) {
-        val = fmtDate(val);
-      } else if (val instanceof Date) {
+      }
+      // Format numeric columns
+      else if ((colLower === 'session no' || colLower === 'session number' || colLower === 'invoice no') && val != null && val !== '') {
+        if (val instanceof Date) val = Math.round(((val.getTime() / 86400000) + 25569) * 100) / 100;
+        else { const num = parseFloat(val); if (!isNaN(num)) val = num; }
+      }
+      // Format dates
+      else if (DATE_COLUMNS.has(colLower) && val) {
         val = fmtDate(val);
       }
+      else if (val instanceof Date) {
+        val = fmtDate(val);
+      }
+
       if (val === true) val = 'Yes';
       if (val === false) val = 'No';
+
       cell.value = val;
       cell.font = { size: 9, color: { argb: '333333' } };
       cell.alignment = { vertical: 'middle' };
@@ -290,10 +911,12 @@
     return rowIdx + 1;
   }
 
-  function writeTotalRow(ws, rowIdx, dataRows, cols) {
+  function writeTotalRow(ws, rowIdx, dataRows, cols, role) {
     const row = ws.getRow(rowIdx);
     const rateIdx = cols.findIndex(c => c.toLowerCase() === 'rate');
-    row.getCell(1).value = `Total: ${dataRows.length} session${dataRows.length !== 1 ? 's' : ''}`;
+    // Change #8: designer uses "design" not "session"
+    const unit = role === 'designer' ? 'design' : 'session';
+    row.getCell(1).value = `Total: ${dataRows.length} ${unit}${dataRows.length !== 1 ? 's' : ''}`;
     row.getCell(1).font = { bold: true, size: 9, color: { argb: '333333' } };
     if (rateIdx >= 0) {
       const total = dataRows.reduce((sum, r) => {
@@ -310,49 +933,119 @@
     return rowIdx + 1;
   }
 
-  // ── Main processing ────────────────────────────────────────────────
+  // ── Main processing ───────────────────────────────────────────────
   async function processFiles() {
     const btn = $('#btnProcess');
     btn.disabled = true; btn.textContent = 'Processing…';
+    state.corrections = [];
+
     try {
-      if (state.files.photoEligible) {
-        const rows = await readExcel(state.files.photoEligible);
-        state.headers.photoEligible = extractHeaders(rows);
-        state.parsedData.photoEligible = filterRows(rows, getNameColumn(state.headers.photoEligible));
+      // Reset parsed data
+      for (const k of ['photoEligible','photoNoShow','designEligible','designNoShow']) {
+        state.parsedData[k] = [];
+        state.headers[k] = [];
       }
-      if (state.files.photoNoShow) {
-        const rows = await readExcel(state.files.photoNoShow);
-        state.headers.photoNoShow = extractHeaders(rows);
-        state.parsedData.photoNoShow = filterRows(rows, getNameColumn(state.headers.photoNoShow));
-      }
-      if (state.files.designEligible) {
-        const rows = await readExcel(state.files.designEligible);
-        state.headers.designEligible = extractHeaders(rows);
-        state.parsedData.designEligible = filterRows(rows, getNameColumn(state.headers.designEligible));
-      }
-      if (state.files.designNoShow) {
-        const rows = await readExcel(state.files.designNoShow);
-        state.headers.designNoShow = extractHeaders(rows);
-        state.parsedData.designNoShow = filterRows(rows, getNameColumn(state.headers.designNoShow));
+      let dataEmails = {};
+
+      // Process each uploaded file
+      for (const [key, file] of Object.entries(state.files)) {
+        if (!file || key === 'contacts') continue;
+        const rawRows = await readExcelRaw(file);
+
+        if (detectSectionedFormat(rawRows)) {
+          // New sectioned format — parse all sections from one file
+          const parsed = parseSectionedFile(rawRows);
+          for (const section of ['photoEligible','photoNoShow','designEligible','designNoShow']) {
+            if (parsed[section].length > 0) {
+              state.parsedData[section] = state.parsedData[section].concat(parsed[section]);
+              state.headers[section] = parsed.headers[section];
+            }
+          }
+          dataEmails = { ...dataEmails, ...parsed.emails };
+        } else {
+          // Old flat format — determine role and type from upload zone key
+          let role, type;
+          if (key === 'photoEligible') { role = 'photographer'; type = 'eligible'; }
+          else if (key === 'photoNoShow') { role = 'photographer'; type = 'noShow'; }
+          else if (key === 'designEligible') { role = 'designer'; type = 'eligible'; }
+          else if (key === 'designNoShow') { role = 'designer'; type = 'noShow'; }
+          else continue;
+          const parsed = parseFlatFile(rawRows, role, type);
+          state.parsedData[key] = parsed.rows;
+          state.headers[key] = parsed.headers;
+          dataEmails = { ...dataEmails, ...parsed.emails };
+        }
       }
 
-      // Build contact map: localStorage → uploaded file (uploaded overrides saved)
+      // Ensure all headers are set to templates even if no data
+      if (!state.headers.photoEligible.length) state.headers.photoEligible = PHOTO_ELIGIBLE_COLS;
+      if (!state.headers.photoNoShow.length) state.headers.photoNoShow = PHOTO_NOSHOW_COLS;
+      if (!state.headers.designEligible.length) state.headers.designEligible = DESIGN_ELIGIBLE_COLS;
+      if (!state.headers.designNoShow.length) state.headers.designNoShow = DESIGN_NOSHOW_COLS;
+
+      // ── Elevate ranking override ──────────────────────────────────
+      // If connected to Elevate, fetch fresh rankings and override
+      // whatever Finance put in the Ranking column.
+      state.rankingOverrides = [];
+      if (elevateConnected && elevateRankings) {
+        const allSections = ['photoEligible', 'photoNoShow', 'designEligible', 'designNoShow'];
+        for (const section of allSections) {
+          const isNoShow = section.includes('NoShow');
+          const isDesigner = section.startsWith('design');
+          for (const row of state.parsedData[section]) {
+            const name = getNameFromRow(row);
+            const brand = (row['Brand'] || '').toString().trim();
+            const oldRank = row['Ranking'] || '';
+            const elevateRank = lookupElevateRanking(name, brand);
+
+            if (elevateRank) {
+              // Elevate has this contractor — use its ranking
+              if (oldRank && oldRank !== elevateRank) {
+                state.rankingOverrides.push({ name, brand, old: oldRank, new: elevateRank, type: 'override' });
+              }
+              row['Ranking'] = elevateRank;
+            } else {
+              // Not found in Elevate — default to Bronze
+              if (oldRank !== 'Bronze') {
+                state.rankingOverrides.push({ name, brand, old: oldRank || '(blank)', new: 'Bronze', type: 'default' });
+              }
+              row['Ranking'] = 'Bronze';
+            }
+
+            // Re-run rate corrections with the updated ranking
+            // (since ranking may have changed, the rate needs recalculating)
+            if (!isNoShow) {
+              const ranking = row['Ranking'];
+              const isWeekend = isTruthyYes(row['Weekend/PH']);
+              const sessionType = (row['Session Type'] || '').toString().trim().toLowerCase();
+              const brandLower = (brand || '').toLowerCase();
+              if (ranking && PRICE_TABLE[ranking]) {
+                let expectedRate = isWeekend ? PRICE_TABLE[ranking].we : PRICE_TABLE[ranking].wd;
+                if (!isDesigner && UPLIFT_TYPES.has(sessionType) && brandLower === 'family') {
+                  expectedRate = expectedRate * UPLIFT_FACTOR;
+                }
+                row['Rate'] = expectedRate;
+              }
+            }
+          }
+        }
+      }
+
+      // Build contact map: localStorage → data file emails → uploaded contacts
       const savedContacts = loadSavedContacts();
       let uploadedContacts = {};
       if (state.files.contacts) {
-        const rows = await readExcel(state.files.contacts);
+        const rows = await readExcelRaw(state.files.contacts);
         uploadedContacts = parseContacts(rows);
       }
-      state.contactMap = mergeContacts(savedContacts, uploadedContacts);
-
-      // Save merged map back to localStorage
+      state.contactMap = mergeContacts(savedContacts, dataEmails, uploadedContacts);
       saveContactsToLS(state.contactMap);
 
       // Build contractor list
       const contractors = new Map();
-      function addContractors(rows, nameCol, role) {
+      function addContractors(rows, role) {
         for (const row of rows) {
-          const name = (row[nameCol] || '').toString().trim();
+          const name = getNameFromRow(row);
           const nName = norm(name);
           if (nName && !SKIP_NAMES.has(nName) && !nName.startsWith('applied filter')) {
             const key = nName + '|' + role;
@@ -360,15 +1053,15 @@
           }
         }
       }
-      if (state.parsedData.photoEligible.length) addContractors(state.parsedData.photoEligible, getNameColumn(state.headers.photoEligible), 'photographer');
-      if (state.parsedData.photoNoShow.length) addContractors(state.parsedData.photoNoShow, getNameColumn(state.headers.photoNoShow), 'photographer');
-      if (state.parsedData.designEligible.length) addContractors(state.parsedData.designEligible, getNameColumn(state.headers.designEligible), 'designer');
-      if (state.parsedData.designNoShow.length) addContractors(state.parsedData.designNoShow, getNameColumn(state.headers.designNoShow), 'designer');
+      if (state.parsedData.photoEligible.length) addContractors(state.parsedData.photoEligible, 'photographer');
+      if (state.parsedData.photoNoShow.length) addContractors(state.parsedData.photoNoShow, 'photographer');
+      if (state.parsedData.designEligible.length) addContractors(state.parsedData.designEligible, 'designer');
+      if (state.parsedData.designNoShow.length) addContractors(state.parsedData.designNoShow, 'designer');
 
-      const photoEligGroups = state.parsedData.photoEligible.length ? groupByName(state.parsedData.photoEligible, getNameColumn(state.headers.photoEligible)) : {};
-      const photoNSGroups = state.parsedData.photoNoShow.length ? groupByName(state.parsedData.photoNoShow, getNameColumn(state.headers.photoNoShow)) : {};
-      const designEligGroups = state.parsedData.designEligible.length ? groupByName(state.parsedData.designEligible, getNameColumn(state.headers.designEligible)) : {};
-      const designNSGroups = state.parsedData.designNoShow.length ? groupByName(state.parsedData.designNoShow, getNameColumn(state.headers.designNoShow)) : {};
+      const photoEligGroups = groupByName(state.parsedData.photoEligible);
+      const photoNSGroups = groupByName(state.parsedData.photoNoShow);
+      const designEligGroups = groupByName(state.parsedData.designEligible);
+      const designNSGroups = groupByName(state.parsedData.designNoShow);
 
       const total = contractors.size;
       showProgress('Generating files…', 0, total);
@@ -379,19 +1072,21 @@
       for (const [compositeKey, info] of contractors) {
         const { name, role } = info;
         const nName = norm(name);
-        let eligRows = [], nsRows = [], eligHeaders = [], nsHeaders = [];
+        let eligRows, nsRows, eligCols, nsCols;
+
         if (role === 'photographer') {
           eligRows = photoEligGroups[name] || [];
           nsRows = photoNSGroups[name] || [];
-          eligHeaders = state.headers.photoEligible.length ? state.headers.photoEligible : state.headers.photoNoShow;
-          nsHeaders = state.headers.photoNoShow.length ? state.headers.photoNoShow : state.headers.photoEligible;
+          eligCols = PHOTO_ELIGIBLE_COLS;
+          nsCols = PHOTO_NOSHOW_COLS;
         } else {
           eligRows = designEligGroups[name] || [];
           nsRows = designNSGroups[name] || [];
-          eligHeaders = state.headers.designEligible.length ? state.headers.designEligible : state.headers.designNoShow;
-          nsHeaders = state.headers.designNoShow.length ? state.headers.designNoShow : state.headers.designEligible;
+          eligCols = DESIGN_ELIGIBLE_COLS;
+          nsCols = DESIGN_NOSHOW_COLS;
         }
-        const blob = await generateContractorFile(name, role, eligRows, nsRows, eligHeaders, nsHeaders, periodLabel);
+
+        const blob = await generateContractorFile(name, role, eligRows, nsRows, eligCols, nsCols, periodLabel);
         const contact = state.contactMap[nName];
         manifest.push({
           name, role,
@@ -420,7 +1115,7 @@
     }
   }
 
-  // ── Progress ───────────────────────────────────────────────────────
+  // ── Progress ──────────────────────────────────────────────────────
   function showProgress(title, current, total) {
     $('#progressOverlay').classList.remove('hidden');
     $('#progressTitle').textContent = title;
@@ -430,7 +1125,7 @@
   }
   function hideProgress() { $('#progressOverlay').classList.add('hidden'); }
 
-  // ── Preview UI ─────────────────────────────────────────────────────
+  // ── Preview UI ────────────────────────────────────────────────────
   function showPreview() {
     $('#step-upload').classList.remove('active');
     $('#step-preview').classList.add('active');
@@ -444,6 +1139,36 @@
 
     const warnings = [];
     if (missingEmail > 0) warnings.push(`<strong>${missingEmail} contractor${missingEmail !== 1 ? 's' : ''} missing email.</strong> Type them in the Email column below — they'll be remembered for next time.`);
+
+    // Show Elevate ranking info
+    if (elevateConnected && elevateRankings) {
+      const overrides = state.rankingOverrides.filter(r => r.type === 'override');
+      const defaults = state.rankingOverrides.filter(r => r.type === 'default');
+      const parts = [`<strong>🏆 Elevate rankings applied</strong> (${elevateRankings.periodLabel || 'latest period'})`];
+      if (overrides.length > 0) {
+        // Deduplicate by name+brand
+        const unique = [...new Map(overrides.map(o => [`${o.name}|${o.brand}`, o])).values()];
+        const overrideList = unique.length <= 5
+          ? unique.map(o => `${o.name} (${o.brand}): ${o.old} → ${o.new}`).join('<br>')
+          : `${unique.length} contractor-brand rankings overridden vs Finance file`;
+        parts.push(`<br><span class="ranking-badge override">Overridden</span> ${overrideList}`);
+      }
+      if (defaults.length > 0) {
+        const unique = [...new Map(defaults.map(o => [`${o.name}`, o])).values()];
+        parts.push(`<br><span class="ranking-badge default">Defaulted to Bronze</span> ${unique.map(o => o.name).join(', ')}`);
+      }
+      if (overrides.length === 0 && defaults.length === 0) parts.push(' — all rankings matched');
+      warnings.push(parts.join(''));
+    }
+
+    // Show rate corrections if any
+    if (state.corrections.length > 0) {
+      const correctionsSummary = state.corrections.length <= 5
+        ? state.corrections.map(c => `${c.name}: ${c.msg}`).join('<br>')
+        : `${state.corrections.length} rate corrections applied.`;
+      warnings.push(`<strong>Rate corrections applied:</strong><br>${correctionsSummary}`);
+    }
+
     $('#warnings').innerHTML = warnings.map(w => `<div class="warning-item">${w}</div>`).join('');
 
     const table = document.createElement('table');
@@ -454,7 +1179,7 @@
         <th>Eligible</th><th>No Show</th><th>Download</th><th>Status</th>
       </tr></thead>
       <tbody>${m.map((item, idx) => {
-        const sourceLabel = item.emailSource === 'uploaded' ? 'from file' : item.emailSource === 'saved' ? 'remembered' : '';
+        const sourceLabel = item.emailSource === 'uploaded' ? 'from file' : item.emailSource === 'data' ? 'from data' : item.emailSource === 'saved' ? 'remembered' : '';
         return `<tr data-role="${item.role}" data-has-email="${item.email ? 'yes' : 'no'}" data-idx="${idx}">
           <td><strong>${item.name}</strong></td>
           <td><span class="role-badge ${item.role}">${item.role === 'photographer' ? 'Photographer' : 'Designer'}</span></td>
@@ -494,7 +1219,6 @@
         }
         saveContactsToLS(state.contactMap);
         updateEmailWarning();
-        // Update row filter attribute
         input.closest('tr').dataset.hasEmail = newEmail ? 'yes' : 'no';
       });
     });
@@ -518,6 +1242,9 @@
     const missingEmail = m.filter(x => !x.email).length;
     const warnings = [];
     if (missingEmail > 0) warnings.push(`<strong>${missingEmail} contractor${missingEmail !== 1 ? 's' : ''} missing email.</strong> Type them in the Email column below — they'll be remembered for next time.`);
+    if (state.corrections.length > 0) {
+      warnings.push(`<strong>${state.corrections.length} rate correction${state.corrections.length !== 1 ? 's' : ''} applied.</strong>`);
+    }
     $('#warnings').innerHTML = warnings.map(w => `<div class="warning-item">${w}</div>`).join('');
   }
 
@@ -529,7 +1256,7 @@
     return parts.join(' - ') + '.xlsx';
   }
 
-  // ── Filters ────────────────────────────────────────────────────────
+  // ── Filters ───────────────────────────────────────────────────────
   function initFilters() {
     document.addEventListener('click', e => {
       if (!e.target.matches('.filter-btn')) return;
@@ -546,7 +1273,7 @@
     });
   }
 
-  // ── Download All ───────────────────────────────────────────────────
+  // ── Download All ──────────────────────────────────────────────────
   async function downloadAll() {
     const btn = $('#btnDownloadAll');
     btn.disabled = true; btn.textContent = 'Zipping…';
@@ -559,7 +1286,7 @@
     finally { btn.disabled = false; btn.textContent = 'Download All as ZIP'; }
   }
 
-  // ── Export / Import contacts ───────────────────────────────────────
+  // ── Export contacts ───────────────────────────────────────────────
   function exportContacts() {
     const contacts = loadSavedContacts();
     const entries = Object.values(contacts);
@@ -569,7 +1296,7 @@
     saveAs(blob, 'verve-contractor-contacts.csv');
   }
 
-  // ── Email sending ──────────────────────────────────────────────────
+  // ── Email sending ─────────────────────────────────────────────────
   function blobToBase64(blob) {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -578,14 +1305,11 @@
       reader.readAsDataURL(blob);
     });
   }
-
   function buildEmailSubject(template, name, period) {
     return template.replace(/{name}/g, name).replace(/{period}/g, period);
   }
-
   function buildEmailBody(template, name, period) {
     const text = template.replace(/{name}/g, name).replace(/{period}/g, period);
-    // Convert line breaks to HTML
     return text.split('\n').map(line => line || '<br>').join('<br>');
   }
 
@@ -671,7 +1395,6 @@
         results.innerHTML += `<div class="result-line error">${item.name}: ${err.message}</div>`;
       }
       showProgress('Sending emails…', sent + failed, sendable.length);
-      // Rate limit: 200ms between sends
       await new Promise(r => setTimeout(r, 200));
     }
 
@@ -681,10 +1404,11 @@
     btn.disabled = false;
   }
 
-  // ── Init ───────────────────────────────────────────────────────────
+  // ── Init ──────────────────────────────────────────────────────────
   function init() {
     initUploads();
     initFilters();
+    initElevateUI();
     showSavedContactCount();
     $('#btnProcess').addEventListener('click', processFiles);
     $('#btnDownloadAll').addEventListener('click', downloadAll);
