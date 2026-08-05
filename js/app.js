@@ -17,8 +17,8 @@
     'session date':               'Session Date',
     'apptmt date':                'Appointment Date',
     'appointment date':           'Appointment Date',
-    'inv date':                   'Appointment Date',
-    'invoice date':               'Appointment Date',
+    'inv date':                   'Invoice Date',
+    'invoice date':               'Invoice Date',
     'session no':                 'Session No',
     'session number':             'Session No',
     'session no.':                'Session No',
@@ -33,12 +33,17 @@
     'session type':               'Session Type',
     'marketing channel':          'Marketing Channel',
     'lead source':                'Lead Source',
-    'weekend':                    'Weekend/PH',
-    'weekend?':                   'Weekend/PH',
-    'weekend/ph':                 'Weekend/PH',
-    'weekend / ph':               'Weekend/PH',
+    'weekend':                    'Weekend',
+    'weekend?':                   'Weekend',
+    'weekend/ph':                 'Weekend',
+    'weekend / ph':               'Weekend',
     'rate':                       'Rate',
     'brand':                      'Brand',
+    'canceled':                   'Canceled',
+    'cancelled':                  'Canceled',
+    'no show':                    'No Show',
+    'session status':             'Session Status',
+    'confirmed':                  'Confirmed',
     'email':                      '_EMAIL_',
     'email address':              '_EMAIL_',
     'e-mail':                     '_EMAIL_',
@@ -53,7 +58,8 @@
     'session type','marketing channel','lead source','weekend','weekend?',
     'weekend/ph','rate','brand','email','email address','apptmt date',
     'appointment date','inv date','invoice date','invoice no','invoice number',
-    'inv number','first name','last name',
+    'inv number','first name','last name','canceled','cancelled','no show',
+    'session status','confirmed',
   ]);
 
   // ── Location code mapping ─────────────────────────────────────────
@@ -115,16 +121,19 @@
   }
 
   // ── Output column templates ───────────────────────────────────────
-  // These define the EXACT column order for every output file.
-  // Change #7: No Show columns match Eligible column order.
-  // Change #8: Designer uses "design" language (except Session Number stays).
-  // Change #9: Designer No Show uses "Appointment Date" / "Session Number".
+  // Restored from the original portal's OUTPUT_TEMPLATES — the full
+  // column set per section, in the original order. Only Lead Source
+  // has been removed per Tamara's request. Invoice Date/Invoice No and
+  // Appointment Date/Session No are DISTINCT fields, not aliases of
+  // each other — Designer Eligible rows carry both an Invoice Date/No
+  // (billing) and an Appointment Date/Session No (the actual booking).
 
-  const PHOTO_ELIGIBLE_COLS = ['Ranking', 'Session Date', 'Session No', 'Client', 'Location', 'Session Type', 'Marketing Channel', 'Weekend/PH', 'Rate'];
-  const PHOTO_NOSHOW_COLS  = ['Ranking', 'Session Date', 'Session No', 'Client', 'Location', 'Session Type', 'Marketing Channel', 'Weekend/PH', 'Rate'];
+  const PHOTO_ELIGIBLE_COLS = ['Ranking', 'Session Date', 'Session No', 'Client', 'Location', 'Session Type', 'Marketing Channel', 'Weekend', 'Rate', 'Brand', 'Canceled', 'No Show', 'Session Status'];
+  const PHOTO_NOSHOW_COLS  = ['Ranking', 'Session Date', 'Session No', 'Client', 'Location', 'Weekend', 'Marketing Channel', 'Session Type', 'Rate', 'Brand', 'Confirmed', 'No Show'];
 
-  const DESIGN_ELIGIBLE_COLS = ['Ranking', 'Appointment Date', 'Session No', 'Client', 'Location', 'Session Type', 'Marketing Channel', 'Weekend/PH', 'Rate'];
-  const DESIGN_NOSHOW_COLS  = ['Ranking', 'Appointment Date', 'Session Number', 'Client', 'Location', 'Session Type', 'Marketing Channel', 'Weekend/PH', 'Rate'];
+  const DESIGN_ELIGIBLE_COLS = ['Ranking', 'Invoice Date', 'Invoice No', 'Client', 'Location', 'Session Type', 'Marketing Channel', 'Weekend', 'Rate', 'Brand', 'Appointment Date', 'Session No'];
+  const DESIGN_NOSHOW_COLS  = ['Ranking', 'Appointment Date', 'Session No', 'Client', 'Location', 'Weekend', 'Marketing Channel', 'Session Type', 'Rate', 'Brand', 'No Show'];
+
 
   // ── State ─────────────────────────────────────────────────────────
   const state = {
@@ -580,17 +589,6 @@
 
         for (const col of templateCols) {
           let val = extractRowValue(row, currentColMap, col);
-
-          // Session No ↔ Session Number mapping (same data, different header)
-          if (val === '' || val === undefined) {
-            if (col === 'Session No') val = extractRowValue(row, currentColMap, 'Session Number');
-            if (col === 'Session Number') val = extractRowValue(row, currentColMap, 'Session No');
-          }
-          // Appointment Date ↔ Session Date mapping
-          if (val === '' || val === undefined) {
-            if (col === 'Appointment Date') val = extractRowValue(row, currentColMap, 'Session Date');
-            if (col === 'Session Date') val = extractRowValue(row, currentColMap, 'Appointment Date');
-          }
           obj[col] = val;
         }
 
@@ -598,7 +596,7 @@
         if (obj['Ranking']) obj['Ranking'] = normalizeRanking(obj['Ranking']);
 
         // Resolve location codes
-        const sessionNoVal = obj['Session No'] || obj['Session Number'] || '';
+        const sessionNoVal = obj['Session No'] || '';
         obj['Location'] = resolveLocation(obj['Location'], sessionNoVal);
 
         // Detect brand from location if not already present
@@ -663,17 +661,11 @@
 
       for (const col of templateCols) {
         let val = extractRowValue(row, colMap, col);
-        if (val === '' || val === undefined) {
-          if (col === 'Session No') val = extractRowValue(row, colMap, 'Session Number');
-          if (col === 'Session Number') val = extractRowValue(row, colMap, 'Session No');
-          if (col === 'Appointment Date') val = extractRowValue(row, colMap, 'Session Date');
-          if (col === 'Session Date') val = extractRowValue(row, colMap, 'Appointment Date');
-        }
         obj[col] = val;
       }
 
       if (obj['Ranking']) obj['Ranking'] = normalizeRanking(obj['Ranking']);
-      const sessionNoVal = obj['Session No'] || obj['Session Number'] || '';
+      const sessionNoVal = obj['Session No'] || '';
       obj['Location'] = resolveLocation(obj['Location'], sessionNoVal);
       if (!obj['Brand']) obj['Brand'] = detectBrandFromLocation(obj['Location']);
 
@@ -699,7 +691,7 @@
     const rateRaw = obj['Rate'];
     const rate = parseFloat(rateRaw);
     const ranking = obj['Ranking'] || '';
-    const isWeekend = isTruthyYes(obj['Weekend/PH']);
+    const isWeekend = isTruthyYes(obj['Weekend']);
     const sessionType = (obj['Session Type'] || '').toString().trim().toLowerCase();
     const brand = (obj['Brand'] || '').toString().trim().toLowerCase();
 
@@ -1016,7 +1008,7 @@
             // (since ranking may have changed, the rate needs recalculating)
             if (!isNoShow) {
               const ranking = row['Ranking'];
-              const isWeekend = isTruthyYes(row['Weekend/PH']);
+              const isWeekend = isTruthyYes(row['Weekend']);
               const sessionType = (row['Session Type'] || '').toString().trim().toLowerCase();
               const brandLower = (brand || '').toLowerCase();
               if (ranking && PRICE_TABLE[ranking]) {
