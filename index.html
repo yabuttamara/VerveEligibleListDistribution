@@ -85,6 +85,12 @@
             <label for="elevateUrl">Elevate Site URL</label>
             <input type="text" id="elevateUrl" placeholder="e.g. https://your-elevate-site.netlify.app">
           </div>
+          <div class="config-row">
+            <label for="elevatePeriod">Period <span class="hint">(defaults to latest)</span></label>
+            <select id="elevatePeriod" disabled>
+              <option value="">Connect first to load periods…</option>
+            </select>
+          </div>
           <div class="elevate-actions">
             <button id="btnTestElevate" class="btn secondary small">Test Connection</button>
             <span id="elevateTestResult" class="elevate-test-result"></span>

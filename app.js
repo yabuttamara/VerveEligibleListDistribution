@@ -158,6 +158,7 @@
   // ── Elevate rankings integration ──────────────────────────────────
   let elevateRankings = null;  // { rankings: { name: { family, intimate } }, periodLabel }
   let elevateConnected = false;
+  let elevatePeriodsList = [];  // [{ periodNumber, label }, ...] newest first
 
   function loadElevateUrl() {
     return localStorage.getItem(ELEVATE_URL_KEY) || '';
@@ -166,14 +167,41 @@
     localStorage.setItem(ELEVATE_URL_KEY, url.replace(/\/+$/, ''));
   }
 
-  async function fetchElevateRankings(baseUrl) {
-    const url = baseUrl.replace(/\/+$/, '') + '/api/rankings';
+  async function fetchElevateRankings(baseUrl, periodNumber) {
+    let url = baseUrl.replace(/\/+$/, '') + '/api/rankings';
+    if (periodNumber) url += `?period=${encodeURIComponent(periodNumber)}`;
     const resp = await fetch(url);
     if (!resp.ok) {
       const body = await resp.json().catch(() => ({}));
       throw new Error(body.error || `HTTP ${resp.status}`);
     }
     return resp.json();
+  }
+
+  async function fetchElevatePeriodsList(baseUrl) {
+    const url = baseUrl.replace(/\/+$/, '') + '/api/rankings?list=1';
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    return Array.isArray(data.periods) ? data.periods : [];
+  }
+
+  function populatePeriodDropdown(periods, selectedPeriodNumber) {
+    const select = $('#elevatePeriod');
+    select.innerHTML = '';
+    if (!periods.length) {
+      select.innerHTML = '<option value="">No periods available</option>';
+      select.disabled = true;
+      return;
+    }
+    for (const p of periods) {
+      const opt = document.createElement('option');
+      opt.value = p.periodNumber;
+      opt.textContent = p.label;
+      select.appendChild(opt);
+    }
+    select.disabled = false;
+    if (selectedPeriodNumber) select.value = String(selectedPeriodNumber);
   }
 
   async function testElevateConnection() {
@@ -187,11 +215,14 @@
     result.textContent = ''; result.className = 'elevate-test-result';
 
     try {
-      const data = await fetchElevateRankings(url);
+      // Fetch the period list first so the dropdown shows options
+      elevatePeriodsList = await fetchElevatePeriodsList(url);
+      const data = await fetchElevateRankings(url);  // latest, to confirm + get default period
       const count = Object.keys(data.rankings || {}).length;
       saveElevateUrl(url);
       elevateRankings = data;
       elevateConnected = true;
+      populatePeriodDropdown(elevatePeriodsList, data.periodNumber);
       result.textContent = `Connected — ${count} contractor${count !== 1 ? 's' : ''} from ${data.periodLabel || 'latest period'}`;
       result.className = 'elevate-test-result success';
       updateElevateStatus();
@@ -202,6 +233,30 @@
       updateElevateStatus();
     } finally {
       btn.disabled = false; btn.textContent = 'Test Connection';
+    }
+  }
+
+  async function onPeriodChange() {
+    const select = $('#elevatePeriod');
+    const periodNumber = select.value;
+    const url = loadElevateUrl();
+    if (!url || !periodNumber) return;
+
+    const result = $('#elevateTestResult');
+    result.textContent = 'Loading period…';
+    result.className = 'elevate-test-result';
+
+    try {
+      const data = await fetchElevateRankings(url, periodNumber);
+      const count = Object.keys(data.rankings || {}).length;
+      elevateRankings = data;
+      elevateConnected = true;
+      result.textContent = `Using ${count} contractor${count !== 1 ? 's' : ''} from ${data.periodLabel}`;
+      result.className = 'elevate-test-result success';
+      updateElevateStatus();
+    } catch (err) {
+      result.textContent = `Failed to load period: ${err.message}`;
+      result.className = 'elevate-test-result error';
     }
   }
 
@@ -245,11 +300,19 @@
     // Test button
     $('#btnTestElevate').addEventListener('click', testElevateConnection);
 
+    // Period dropdown change
+    $('#elevatePeriod').addEventListener('change', onPeriodChange);
+
     // Auto-connect if we have a saved URL
     if (savedUrl) {
-      fetchElevateRankings(savedUrl).then(data => {
+      Promise.all([
+        fetchElevateRankings(savedUrl),
+        fetchElevatePeriodsList(savedUrl),
+      ]).then(([data, periods]) => {
         elevateRankings = data;
         elevateConnected = true;
+        elevatePeriodsList = periods;
+        populatePeriodDropdown(periods, data.periodNumber);
         updateElevateStatus();
       }).catch(() => {});
     }
