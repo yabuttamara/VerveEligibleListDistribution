@@ -317,6 +317,52 @@ main { max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
 .progress-fill { height: 100%; background: var(--accent); border-radius: 3px; width: 0%; transition: width 0.2s; }
 .progress-text { font-size: 0.85rem; color: var(--text-muted); }
 
+/* Elevate connection */
+.elevate-connection {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 1.25rem;
+  overflow: hidden;
+}
+.elevate-header {
+  display: flex; align-items: center; gap: 0.5rem;
+  padding: 0.75rem 1rem;
+  cursor: pointer; user-select: none;
+  font-weight: 500; font-size: 0.9rem;
+}
+.elevate-header:hover { background: var(--accent-light); }
+.elevate-icon { font-size: 1.1rem; }
+.elevate-status {
+  margin-left: auto; font-size: 0.75rem; font-weight: 400;
+  color: var(--text-muted); padding: 0.15rem 0.5rem;
+  background: var(--bg); border-radius: 10px;
+}
+.elevate-status.connected {
+  color: var(--accent); background: var(--accent-light); font-weight: 500;
+}
+.elevate-chevron {
+  font-size: 0.75rem; color: var(--text-muted);
+  transition: transform 0.15s;
+}
+.elevate-chevron.open { transform: rotate(90deg); }
+.elevate-body { padding: 0.75rem 1rem 1rem; border-top: 1px solid var(--border); }
+.elevate-body.hidden { display: none; }
+.elevate-help { font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.75rem; }
+.elevate-actions { display: flex; align-items: center; gap: 0.75rem; margin-top: 0.5rem; }
+.elevate-test-result { font-size: 0.8rem; }
+.elevate-test-result.success { color: var(--accent); }
+.elevate-test-result.error { color: var(--danger); }
+.btn.small { padding: 0.35rem 0.75rem; font-size: 0.8rem; }
+.elevate-body .config-row { margin-bottom: 0; }
+.elevate-body .config-row input { font-size: 0.85rem; padding: 0.4rem 0.6rem; }
+
+/* Ranking override badges in preview */
+.ranking-badge { font-size: 0.7rem; padding: 0.1rem 0.4rem; border-radius: 8px; margin-left: 0.35rem; white-space: nowrap; }
+.ranking-badge.override { background: var(--accent-light); color: var(--accent); }
+.ranking-badge.default { background: var(--warning-bg); color: #856404; }
+.ranking-badge.not-found { background: var(--danger-light); color: var(--danger); }
+
 @media (max-width: 700px) {
   .upload-grid { grid-template-columns: 1fr; }
   .upload-group.full-width .upload-zone { max-width: 100%; }

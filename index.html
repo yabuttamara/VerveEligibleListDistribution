@@ -72,6 +72,26 @@
         </div>
       </div>
 
+      <div class="elevate-connection">
+        <div class="elevate-header" id="elevateToggle">
+          <span class="elevate-icon">🏆</span>
+          <span>Elevate Rankings</span>
+          <span class="elevate-status" id="elevateStatus">Not connected</span>
+          <span class="elevate-chevron" id="elevateChevron">▸</span>
+        </div>
+        <div class="elevate-body hidden" id="elevateBody">
+          <p class="elevate-help">Connect to your Elevate site to auto-populate rankings. Rankings will override whatever Finance put in the file.</p>
+          <div class="config-row">
+            <label for="elevateUrl">Elevate Site URL</label>
+            <input type="text" id="elevateUrl" placeholder="e.g. https://your-elevate-site.netlify.app">
+          </div>
+          <div class="elevate-actions">
+            <button id="btnTestElevate" class="btn secondary small">Test Connection</button>
+            <span id="elevateTestResult" class="elevate-test-result"></span>
+          </div>
+        </div>
+      </div>
+
       <div class="period-input">
         <label for="periodLabel">Period Label <span class="hint">(used in filenames and email subject)</span></label>
         <input type="text" id="periodLabel" placeholder="e.g. Fortnight Ending 29-Jul-2026">

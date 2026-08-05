@@ -134,6 +134,7 @@
     contactMap: {},
     manifest: [],
     corrections: [],  // rate corrections log
+    rankingOverrides: [],  // Elevate ranking override log
   };
 
   const SKIP_NAMES = new Set(['assign photographer', 'assign designer', 'total']);
@@ -148,10 +149,111 @@
 
   const DATE_COLUMNS = new Set(['session date', 'appointment date', 'inv date', 'invoice date', 'apptmt date']);
   const LS_KEY = 'verve-portal-contacts';
+  const ELEVATE_URL_KEY = 'verve-portal-elevate-url';
 
   const $ = s => document.querySelector(s);
   const $$ = s => document.querySelectorAll(s);
   const norm = s => (s || '').toString().trim().toLowerCase();
+
+  // ── Elevate rankings integration ──────────────────────────────────
+  let elevateRankings = null;  // { rankings: { name: { family, intimate } }, periodLabel }
+  let elevateConnected = false;
+
+  function loadElevateUrl() {
+    return localStorage.getItem(ELEVATE_URL_KEY) || '';
+  }
+  function saveElevateUrl(url) {
+    localStorage.setItem(ELEVATE_URL_KEY, url.replace(/\/+$/, ''));
+  }
+
+  async function fetchElevateRankings(baseUrl) {
+    const url = baseUrl.replace(/\/+$/, '') + '/api/rankings';
+    const resp = await fetch(url);
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => ({}));
+      throw new Error(body.error || `HTTP ${resp.status}`);
+    }
+    return resp.json();
+  }
+
+  async function testElevateConnection() {
+    const urlInput = $('#elevateUrl');
+    const result = $('#elevateTestResult');
+    const btn = $('#btnTestElevate');
+    const url = urlInput.value.trim();
+    if (!url) { result.textContent = 'Enter a URL first'; result.className = 'elevate-test-result error'; return; }
+
+    btn.disabled = true; btn.textContent = 'Testing…';
+    result.textContent = ''; result.className = 'elevate-test-result';
+
+    try {
+      const data = await fetchElevateRankings(url);
+      const count = Object.keys(data.rankings || {}).length;
+      saveElevateUrl(url);
+      elevateRankings = data;
+      elevateConnected = true;
+      result.textContent = `Connected — ${count} contractor${count !== 1 ? 's' : ''} from ${data.periodLabel || 'latest period'}`;
+      result.className = 'elevate-test-result success';
+      updateElevateStatus();
+    } catch (err) {
+      elevateConnected = false;
+      result.textContent = `Failed: ${err.message}`;
+      result.className = 'elevate-test-result error';
+      updateElevateStatus();
+    } finally {
+      btn.disabled = false; btn.textContent = 'Test Connection';
+    }
+  }
+
+  function updateElevateStatus() {
+    const statusEl = $('#elevateStatus');
+    if (elevateConnected && elevateRankings) {
+      const count = Object.keys(elevateRankings.rankings || {}).length;
+      statusEl.textContent = `Connected (${count})`;
+      statusEl.classList.add('connected');
+    } else {
+      statusEl.textContent = 'Not connected';
+      statusEl.classList.remove('connected');
+    }
+  }
+
+  function lookupElevateRanking(contractorName, brand) {
+    if (!elevateRankings || !elevateRankings.rankings) return null;
+    const key = norm(contractorName);
+    const entry = elevateRankings.rankings[key];
+    if (!entry) return null;
+    const b = (brand || '').toLowerCase();
+    if (b === 'family') return entry.family || null;
+    if (b === 'intimate') return entry.intimate || null;
+    // If no brand detected, try family first then intimate
+    return entry.family || entry.intimate || null;
+  }
+
+  function initElevateUI() {
+    // Load saved URL
+    const savedUrl = loadElevateUrl();
+    if (savedUrl) $('#elevateUrl').value = savedUrl;
+
+    // Toggle panel
+    $('#elevateToggle').addEventListener('click', () => {
+      const body = $('#elevateBody');
+      const chevron = $('#elevateChevron');
+      body.classList.toggle('hidden');
+      chevron.classList.toggle('open');
+    });
+
+    // Test button
+    $('#btnTestElevate').addEventListener('click', testElevateConnection);
+
+    // Auto-connect if we have a saved URL
+    if (savedUrl) {
+      fetchElevateRankings(savedUrl).then(data => {
+        elevateRankings = data;
+        elevateConnected = true;
+        updateElevateStatus();
+      }).catch(() => {});
+    }
+  }
 
   // ── localStorage contacts ─────────────────────────────────────────
   function loadSavedContacts() {
@@ -818,6 +920,54 @@
       if (!state.headers.designEligible.length) state.headers.designEligible = DESIGN_ELIGIBLE_COLS;
       if (!state.headers.designNoShow.length) state.headers.designNoShow = DESIGN_NOSHOW_COLS;
 
+      // ── Elevate ranking override ──────────────────────────────────
+      // If connected to Elevate, fetch fresh rankings and override
+      // whatever Finance put in the Ranking column.
+      state.rankingOverrides = [];
+      if (elevateConnected && elevateRankings) {
+        const allSections = ['photoEligible', 'photoNoShow', 'designEligible', 'designNoShow'];
+        for (const section of allSections) {
+          const isNoShow = section.includes('NoShow');
+          const isDesigner = section.startsWith('design');
+          for (const row of state.parsedData[section]) {
+            const name = getNameFromRow(row);
+            const brand = (row['Brand'] || '').toString().trim();
+            const oldRank = row['Ranking'] || '';
+            const elevateRank = lookupElevateRanking(name, brand);
+
+            if (elevateRank) {
+              // Elevate has this contractor — use its ranking
+              if (oldRank && oldRank !== elevateRank) {
+                state.rankingOverrides.push({ name, brand, old: oldRank, new: elevateRank, type: 'override' });
+              }
+              row['Ranking'] = elevateRank;
+            } else {
+              // Not found in Elevate — default to Bronze
+              if (oldRank !== 'Bronze') {
+                state.rankingOverrides.push({ name, brand, old: oldRank || '(blank)', new: 'Bronze', type: 'default' });
+              }
+              row['Ranking'] = 'Bronze';
+            }
+
+            // Re-run rate corrections with the updated ranking
+            // (since ranking may have changed, the rate needs recalculating)
+            if (!isNoShow) {
+              const ranking = row['Ranking'];
+              const isWeekend = isTruthyYes(row['Weekend/PH']);
+              const sessionType = (row['Session Type'] || '').toString().trim().toLowerCase();
+              const brandLower = (brand || '').toLowerCase();
+              if (ranking && PRICE_TABLE[ranking]) {
+                let expectedRate = isWeekend ? PRICE_TABLE[ranking].we : PRICE_TABLE[ranking].wd;
+                if (!isDesigner && UPLIFT_TYPES.has(sessionType) && brandLower === 'family') {
+                  expectedRate = expectedRate * UPLIFT_FACTOR;
+                }
+                row['Rate'] = expectedRate;
+              }
+            }
+          }
+        }
+      }
+
       // Build contact map: localStorage → data file emails → uploaded contacts
       const savedContacts = loadSavedContacts();
       let uploadedContacts = {};
@@ -927,11 +1077,32 @@
     const warnings = [];
     if (missingEmail > 0) warnings.push(`<strong>${missingEmail} contractor${missingEmail !== 1 ? 's' : ''} missing email.</strong> Type them in the Email column below — they'll be remembered for next time.`);
 
+    // Show Elevate ranking info
+    if (elevateConnected && elevateRankings) {
+      const overrides = state.rankingOverrides.filter(r => r.type === 'override');
+      const defaults = state.rankingOverrides.filter(r => r.type === 'default');
+      const parts = [`<strong>🏆 Elevate rankings applied</strong> (${elevateRankings.periodLabel || 'latest period'})`];
+      if (overrides.length > 0) {
+        // Deduplicate by name+brand
+        const unique = [...new Map(overrides.map(o => [`${o.name}|${o.brand}`, o])).values()];
+        const overrideList = unique.length <= 5
+          ? unique.map(o => `${o.name} (${o.brand}): ${o.old} → ${o.new}`).join('<br>')
+          : `${unique.length} contractor-brand rankings overridden vs Finance file`;
+        parts.push(`<br><span class="ranking-badge override">Overridden</span> ${overrideList}`);
+      }
+      if (defaults.length > 0) {
+        const unique = [...new Map(defaults.map(o => [`${o.name}`, o])).values()];
+        parts.push(`<br><span class="ranking-badge default">Defaulted to Bronze</span> ${unique.map(o => o.name).join(', ')}`);
+      }
+      if (overrides.length === 0 && defaults.length === 0) parts.push(' — all rankings matched');
+      warnings.push(parts.join(''));
+    }
+
     // Show rate corrections if any
     if (state.corrections.length > 0) {
       const correctionsSummary = state.corrections.length <= 5
         ? state.corrections.map(c => `${c.name}: ${c.msg}`).join('<br>')
-        : `${state.corrections.length} rate corrections applied. <a href="#" onclick="event.preventDefault(); alert('${state.corrections.map(c => c.name + ': ' + c.msg).join('\\n').replace(/'/g, "\\'")}')">View all</a>`;
+        : `${state.corrections.length} rate corrections applied.`;
       warnings.push(`<strong>Rate corrections applied:</strong><br>${correctionsSummary}`);
     }
 
@@ -1174,6 +1345,7 @@
   function init() {
     initUploads();
     initFilters();
+    initElevateUI();
     showSavedContactCount();
     $('#btnProcess').addEventListener('click', processFiles);
     $('#btnDownloadAll').addEventListener('click', downloadAll);
