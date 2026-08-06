@@ -94,6 +94,189 @@
     return '';
   }
 
+  // ── Location → state (for public holiday checks) ───────────────────
+  const LOCATION_STATE = {
+    'verve portraits - alexandria': 'NSW',
+    'verve portraits - richmond': 'VIC',
+    'verve portraits - fortitude valley': 'QLD',
+    'verve intimate - south melbourne': 'VIC',
+    'verve intimate - surry hills': 'NSW',
+    'verve intimate - fortitude valley': 'QLD',
+  };
+  function stateForLocation(location) {
+    const key = String(location || '').trim().toLowerCase();
+    return LOCATION_STATE[key] || 'VIC'; // default: matches Head Office / unrecognised
+  }
+
+  // ── Robust date parsing for weekend/public-holiday verification ────
+  // Everything here works in UTC-space consistently (construct with
+  // Date.UTC, read with getUTC*) so the calculated day-of-week can never
+  // drift depending on the browser's local timezone — a date read as
+  // "27 Jul 2026" always evaluates as 27 Jul 2026, never the day before
+  // or after. This mirrors the UTC approach fmtDate() already uses.
+  const MONTH_ABBR_MAP = {
+    jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
+    jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
+  };
+  function parseDateForWeekendCheck(raw) {
+    if (raw instanceof Date && !isNaN(raw)) {
+      return new Date(Date.UTC(raw.getFullYear(), raw.getMonth(), raw.getDate()));
+    }
+    if (typeof raw === 'number' && isFinite(raw)) {
+      // Excel serial date -> the UTC calendar date it represents.
+      const d = new Date((raw - 25569) * 86400000);
+      if (isNaN(d)) return null;
+      return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+    }
+    if (!raw) return null;
+    const s = String(raw).trim();
+    if (!s) return null;
+    // D/M/Y, D-M-Y, D.M.Y (all-numeric)
+    const m1 = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/);
+    if (m1) {
+      let [, d, mo, y] = m1;
+      if (y.length === 2) y = '20' + y;
+      const dt = new Date(Date.UTC(Number(y), Number(mo) - 1, Number(d)));
+      if (!isNaN(dt)) return dt;
+    }
+    // "27-Jul-2026" / "27 Jul 2026" — the format actually used throughout
+    // Finance's sectioned exports and this portal's own output files.
+    const m2 = s.match(/^(\d{1,2})[\s\-]([A-Za-z]{3,})[\s\-](\d{4})$/);
+    if (m2) {
+      const [, d, monRaw, y] = m2;
+      const monKey = monRaw.slice(0, 3).toLowerCase();
+      if (monKey in MONTH_ABBR_MAP) {
+        const dt = new Date(Date.UTC(Number(y), MONTH_ABBR_MAP[monKey], Number(d)));
+        if (!isNaN(dt)) return dt;
+      }
+    }
+    // ISO fallback
+    if (/^\d{4}-\d{2}-\d{2}/.test(s)) {
+      const dt = new Date(s);
+      if (!isNaN(dt)) return new Date(Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth(), dt.getUTCDate()));
+    }
+    return null;
+  }
+
+  /* ---- Australian public holiday calculator (National + NSW/VIC/QLD) ----
+     Calculated algorithmically each year (Easter via the Anonymous
+     Gregorian algorithm, "Nth weekday of month" rules, standard
+     weekend-shift rules) rather than hard-coded, so it stays correct into
+     future years automatically. Best-effort, not government-verified —
+     state governments occasionally gazette one-off local holidays a pure
+     rule engine can't predict. */
+  function easterSundayUTC(year) {
+    const a = year % 19;
+    const b = Math.floor(year / 100);
+    const c = year % 100;
+    const d = Math.floor(b / 4);
+    const e = b % 4;
+    const f = Math.floor((b + 8) / 25);
+    const g = Math.floor((b - f + 1) / 3);
+    const h = (19 * a + b - d - g + 15) % 30;
+    const i = Math.floor(c / 4);
+    const k = c % 4;
+    const l = (32 + 2 * e + 2 * i - h - k) % 7;
+    const m = Math.floor((a + 11 * h + 22 * l) / 451);
+    const month = Math.floor((h + l - 7 * m + 114) / 31);
+    const day = ((h + l - 7 * m + 114) % 31) + 1;
+    return new Date(Date.UTC(year, month - 1, day));
+  }
+  function addDaysUTC(date, n) {
+    const d = new Date(date);
+    d.setUTCDate(d.getUTCDate() + n);
+    return d;
+  }
+  function nthWeekdayOfMonthUTC(year, month1to12, weekday, n) {
+    const first = new Date(Date.UTC(year, month1to12 - 1, 1));
+    const firstWeekday = first.getUTCDay();
+    const day = 1 + ((7 + weekday - firstWeekday) % 7) + (n - 1) * 7;
+    return new Date(Date.UTC(year, month1to12 - 1, day));
+  }
+  function observedFixedUTC(year, month1to12, day) {
+    const d = new Date(Date.UTC(year, month1to12 - 1, day));
+    const dow = d.getUTCDay();
+    if (dow === 6) return addDaysUTC(d, 2); // Saturday -> Monday
+    if (dow === 0) return addDaysUTC(d, 1); // Sunday -> Monday
+    return d;
+  }
+  function christmasBoxingUTC(year) {
+    const dec25 = new Date(Date.UTC(year, 11, 25));
+    const dow = dec25.getUTCDay();
+    let christmas, boxing;
+    if (dow === 6) { christmas = new Date(Date.UTC(year, 11, 27)); boxing = new Date(Date.UTC(year, 11, 28)); }
+    else if (dow === 0) { christmas = new Date(Date.UTC(year, 11, 27)); boxing = new Date(Date.UTC(year, 11, 26)); }
+    else if (dow === 5) { christmas = new Date(Date.UTC(year, 11, 25)); boxing = new Date(Date.UTC(year, 11, 28)); }
+    else { christmas = dec25; boxing = new Date(Date.UTC(year, 11, 26)); }
+    return [
+      { date: christmas, name: 'Christmas Day' },
+      { date: boxing, name: 'Boxing Day' },
+    ];
+  }
+  function dateKeyUTC(d) {
+    return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+  }
+  const _holidayCache = {};
+  function getPublicHolidays(year, state) {
+    const cacheKey = `${year}_${state}`;
+    if (_holidayCache[cacheKey]) return _holidayCache[cacheKey];
+    const easter = easterSundayUTC(year);
+    const list = [
+      { date: observedFixedUTC(year, 1, 1), name: "New Year's Day" },
+      { date: observedFixedUTC(year, 1, 26), name: 'Australia Day' },
+      { date: addDaysUTC(easter, -2), name: 'Good Friday' },
+      { date: addDaysUTC(easter, -1), name: 'Easter Saturday' },
+      { date: easter, name: 'Easter Sunday' },
+      { date: addDaysUTC(easter, 1), name: 'Easter Monday' },
+      { date: new Date(Date.UTC(year, 3, 25)), name: 'Anzac Day' },
+      ...christmasBoxingUTC(year),
+    ];
+    if (state === 'VIC') {
+      list.push({ date: nthWeekdayOfMonthUTC(year, 3, 1, 2), name: 'Labour Day (VIC)' });
+      list.push({ date: nthWeekdayOfMonthUTC(year, 6, 1, 2), name: "King's Birthday (VIC)" });
+      list.push({ date: nthWeekdayOfMonthUTC(year, 11, 2, 1), name: 'Melbourne Cup Day' });
+    } else if (state === 'NSW') {
+      list.push({ date: nthWeekdayOfMonthUTC(year, 6, 1, 2), name: "King's Birthday (NSW)" });
+      list.push({ date: nthWeekdayOfMonthUTC(year, 10, 1, 1), name: 'Labour Day (NSW)' });
+    } else if (state === 'QLD') {
+      list.push({ date: nthWeekdayOfMonthUTC(year, 5, 1, 1), name: 'Labour Day (QLD)' });
+      list.push({ date: nthWeekdayOfMonthUTC(year, 10, 1, 1), name: "King's Birthday (QLD)" });
+    }
+    _holidayCache[cacheKey] = list;
+    return list;
+  }
+  function getPublicHolidayName(date, state) {
+    if (!date || isNaN(date)) return null;
+    const holidays = getPublicHolidays(date.getUTCFullYear(), state);
+    const key = dateKeyUTC(date);
+    const match = holidays.find(h => dateKeyUTC(h.date) === key);
+    return match ? match.name : null;
+  }
+
+  // ── Verified weekend/PH status ──────────────────────────────────────
+  // The Appointment/Session Date is the source of truth for whether a
+  // row was a weekday or weekend one — not Finance's "Weekend" column,
+  // which is manually set and can be (and has been, in real files) wrong
+  // for individual rows. A public holiday overrides either way. The
+  // file's flag is used only as a fallback when no date can be parsed at
+  // all, so a row is never left completely unpriced.
+  function effectiveWeekendInfo(obj) {
+    const dateRaw = obj['Session Date'] || obj['Appointment Date'] || obj['Invoice Date'] || '';
+    const parsedDate = parseDateForWeekendCheck(dateRaw);
+    const flagSaysWeekend = isTruthyYes(obj['Weekend']);
+
+    if (parsedDate) {
+      const day = parsedDate.getUTCDay(); // 0 = Sunday, 6 = Saturday
+      const isCalendarWeekend = day === 0 || day === 6;
+      const state = stateForLocation(obj['Location']);
+      const holidayName = getPublicHolidayName(parsedDate, state);
+      const effectiveWeekend = isCalendarWeekend || !!holidayName;
+      return { effectiveWeekend, holidayName, flagSaysWeekend, flagMismatch: flagSaysWeekend !== effectiveWeekend, hasDate: true };
+    }
+    // No usable date — fall back to whatever the file's own flag says.
+    return { effectiveWeekend: flagSaysWeekend, holidayName: null, flagSaysWeekend, flagMismatch: false, hasDate: false };
+  }
+
   // ── Ranking normalisation ─────────────────────────────────────────
   const RANKING_ALIASES = { 'elevate': 'Elite' };
 
@@ -110,6 +293,18 @@
   // Multiplier types — only for Family brand
   const UPLIFT_TYPES = new Set(['10+', 'newborn']);
   const UPLIFT_FACTOR = 1.5;
+  // Session Type is a full descriptive string (e.g. "Multi-Generation
+  // Family (10+ People)" or "Family with Newborn (Under 8 Weeks)"), not
+  // one of the literal words in UPLIFT_TYPES — this checks whether it
+  // CONTAINS one of those markers, rather than being exactly equal to
+  // one (an exact Set.has() check here would never match anything).
+  function isUpliftSessionType(sessionType) {
+    const s = (sessionType || '').toLowerCase();
+    for (const marker of UPLIFT_TYPES) {
+      if (s.includes(marker)) return true;
+    }
+    return false;
+  }
 
   function normalizeRanking(raw) {
     const s = (raw || '').toString().trim();
@@ -691,34 +886,82 @@
     const rateRaw = obj['Rate'];
     const rate = parseFloat(rateRaw);
     const ranking = obj['Ranking'] || '';
-    const isWeekend = isTruthyYes(obj['Weekend']);
+    const weekendInfo = effectiveWeekendInfo(obj);
+    const isWeekend = weekendInfo.effectiveWeekend;
     const sessionType = (obj['Session Type'] || '').toString().trim().toLowerCase();
     const brand = (obj['Brand'] || '').toString().trim().toLowerCase();
 
+    // Correct the exported Weekend column to what the calendar (and
+    // public holiday check) actually says — the file's flag is manually
+    // set and can be (and has been, in real files) wrong for individual
+    // rows, e.g. a Monday marked "Yes" or a Saturday marked "No". This
+    // also keeps the column consistent with the Rate actually charged.
+    obj['Weekend'] = isWeekend ? 'Yes' : 'No';
+
     if (isNoShow) {
-      // Change #6: No-show is always flat rate, independent of ranking
+      // Change #6: No-show is always flat rate, independent of ranking.
+      // The flat rate itself depends on weekend status, so a corrected
+      // no-show rate already reflects a corrected weekend flag — one
+      // combined message rather than two separate ones for the same row.
       const expectedRate = isWeekend ? NOSHOW_FLAT.we : NOSHOW_FLAT.wd;
       if (!isNaN(rate) && rate !== expectedRate) {
+        const flagNote = weekendInfo.hasDate && weekendInfo.flagMismatch
+          ? ` (file's Weekend flag said "${weekendInfo.flagSaysWeekend ? 'Yes' : 'No'}", but the date is actually a ${isWeekend ? 'weekend' : 'weekday'}${weekendInfo.holidayName ? ` — public holiday: ${weekendInfo.holidayName}` : ''})`
+          : '';
         state.corrections.push({
           name: contractorName, type: 'no-show-rate',
-          msg: `No-show rate corrected from $${rate.toFixed(2)} to $${expectedRate.toFixed(2)} (flat rate)`,
+          msg: `No-show rate corrected from $${rate.toFixed(2)} to $${expectedRate.toFixed(2)} (flat rate)${flagNote}`,
         });
       }
       obj['Rate'] = expectedRate;
       return;
     }
 
-    // Change #4: ×1.5 uplift for Family 10+/Newborn
-    if (!isDesigner && ranking && PRICE_TABLE[ranking] && UPLIFT_TYPES.has(sessionType) && brand === 'family') {
-      const baseRate = isWeekend ? PRICE_TABLE[ranking].we : PRICE_TABLE[ranking].wd;
-      const expectedRate = baseRate * UPLIFT_FACTOR;
-      if (!isNaN(rate) && rate > 0 && Math.abs(rate - expectedRate) > 0.01 && rate < expectedRate) {
+    // Eligible rows: whenever the verified weekend status disagrees with
+    // what Finance's file had, recompute the ranking-based rate (plus
+    // ×1.5 uplift, where it applies) against the *correct* day — a wrong
+    // flag almost always means the rate itself was priced off the wrong
+    // weekday/weekend tier.
+    if (weekendInfo.hasDate && weekendInfo.flagMismatch && ranking && PRICE_TABLE[ranking]) {
+      const isSpecial = !isDesigner && isUpliftSessionType(sessionType) && brand === 'family';
+      let expectedRate = isWeekend ? PRICE_TABLE[ranking].we : PRICE_TABLE[ranking].wd;
+      if (isSpecial) expectedRate = expectedRate * UPLIFT_FACTOR;
+      if (!isNaN(rate) && rate > 0 && Math.abs(rate - expectedRate) > 0.01) {
+        const reason = weekendInfo.holidayName
+          ? `it's a public holiday (${weekendInfo.holidayName})`
+          : `it's actually a ${isWeekend ? 'weekend' : 'weekday'}`;
         state.corrections.push({
-          name: contractorName, type: 'uplift-correction',
-          msg: `${sessionType} rate corrected from $${rate.toFixed(2)} to $${expectedRate.toFixed(2)} (×1.5 uplift)`,
+          name: contractorName, type: 'weekend-rate-correction',
+          msg: `Session ${obj['Session No'] || obj['Invoice No'] || '(no number)'}: rate corrected from $${rate.toFixed(2)} to $${expectedRate.toFixed(2)} — file's Weekend flag said "${weekendInfo.flagSaysWeekend ? 'Yes' : 'No'}", but ${reason}`,
         });
         obj['Rate'] = expectedRate;
-      } else if (isNaN(rate) || rate === 0 || rate === '') {
+      }
+    } else if (weekendInfo.hasDate && weekendInfo.flagMismatch) {
+      // No ranking/price data to recompute against (rare) — at least
+      // flag that the Weekend column itself needed correcting.
+      const reason = weekendInfo.holidayName
+        ? `it's a public holiday (${weekendInfo.holidayName})`
+        : `it's actually a ${isWeekend ? 'weekend' : 'weekday'}`;
+      state.corrections.push({
+        name: contractorName, type: 'weekend-flag-mismatch',
+        msg: `Weekend flag corrected for Session ${obj['Session No'] || obj['Invoice No'] || '(no number)'}: file said "${weekendInfo.flagSaysWeekend ? 'Yes' : 'No'}", but ${reason}`,
+      });
+    }
+
+    // Change #4: ×1.5 uplift for Family 10+/Newborn — covers the case
+    // where the weekend flag was already correct, but Finance still
+    // forgot the uplift multiplier (independent of the check above).
+    if (!isDesigner && ranking && PRICE_TABLE[ranking] && isUpliftSessionType(sessionType) && brand === 'family') {
+      const baseRate = isWeekend ? PRICE_TABLE[ranking].we : PRICE_TABLE[ranking].wd;
+      const expectedRate = baseRate * UPLIFT_FACTOR;
+      const currentRate = parseFloat(obj['Rate']); // may already reflect the correction above
+      if (!isNaN(currentRate) && currentRate > 0 && Math.abs(currentRate - expectedRate) > 0.01 && currentRate < expectedRate) {
+        state.corrections.push({
+          name: contractorName, type: 'uplift-correction',
+          msg: `${sessionType} rate corrected from $${currentRate.toFixed(2)} to $${expectedRate.toFixed(2)} (×1.5 uplift)`,
+        });
+        obj['Rate'] = expectedRate;
+      } else if (isNaN(currentRate) || currentRate === 0 || currentRate === '') {
         obj['Rate'] = expectedRate;
       }
     }
@@ -1008,12 +1251,12 @@
             // (since ranking may have changed, the rate needs recalculating)
             if (!isNoShow) {
               const ranking = row['Ranking'];
-              const isWeekend = isTruthyYes(row['Weekend']);
+              const isWeekend = effectiveWeekendInfo(row).effectiveWeekend;
               const sessionType = (row['Session Type'] || '').toString().trim().toLowerCase();
               const brandLower = (brand || '').toLowerCase();
               if (ranking && PRICE_TABLE[ranking]) {
                 let expectedRate = isWeekend ? PRICE_TABLE[ranking].we : PRICE_TABLE[ranking].wd;
-                if (!isDesigner && UPLIFT_TYPES.has(sessionType) && brandLower === 'family') {
+                if (!isDesigner && isUpliftSessionType(sessionType) && brandLower === 'family') {
                   expectedRate = expectedRate * UPLIFT_FACTOR;
                 }
                 row['Rate'] = expectedRate;
