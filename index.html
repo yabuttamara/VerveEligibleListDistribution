@@ -4,7 +4,18 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Verve Distribution Portal</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="css/styles.css">
+  <script>
+    (function () {
+      var saved = null;
+      try { saved = localStorage.getItem('verveDistPortal_theme'); } catch (e) {}
+      var theme = saved || (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+      document.documentElement.setAttribute('data-theme', theme);
+    })();
+  </script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
@@ -12,6 +23,7 @@
 </head>
 <body>
   <header>
+    <button type="button" class="theme-toggle" id="themeToggle" title="Switch light/dark" aria-label="Switch light/dark theme">🌙</button>
     <h1>Verve Distribution Portal</h1>
     <p class="subtitle">Generate and distribute individual session files to photographers and designers</p>
   </header>
@@ -130,6 +142,7 @@
         </div>
         <div class="download-actions">
           <button id="btnExportContacts" class="btn secondary" title="Save your contact list as a CSV for use on another device">Export Contacts</button>
+          <button id="btnDownloadCollated" class="btn secondary" title="One workbook, 5 tabs: Summary, Eligible Sessions, No Show Sessions, Eligible Appointments, No Show Appointments">Download Collated File</button>
           <button id="btnDownloadAll" class="btn primary">Download All as ZIP</button>
           <button id="btnBack" class="btn secondary">Back</button>
         </div>
