@@ -94,6 +94,98 @@
     return '';
   }
 
+  // ── Marketing Channel identification (ported from the Invoice Portal,
+  //    so both tools normalise "messy" channel text into the same
+  //    official label, and the collated file's Pivot tab groups by
+  //    channel consistently rather than splintering into near-duplicate
+  //    rows like "Website" vs "Website Purchase" vs "WEB-FAMILY") ───────
+  const CHANNEL_CONCEPTS_BY_BRAND = {
+    Family: {
+      list: ['CAMPAIGN-FAMILY', 'CORPORATE PARTNER', 'ENQUIRY-FAMILY', 'FUNDRAISER-FAMILY',
+        'INFLUENCER-FAMILY', 'REFERRAL-FAMILY', 'REPEAT-FAMILY', 'STAFF', 'TRAINING',
+        'WALK-IN', 'WEB-FAMILY'],
+      concepts: {
+        CAMPAIGN: 'CAMPAIGN-FAMILY', PARTNER: 'CORPORATE PARTNER', ENQUIRY: 'ENQUIRY-FAMILY',
+        FUNDRAISER: 'FUNDRAISER-FAMILY', INFLUENCER: 'INFLUENCER-FAMILY', REFERRAL: 'REFERRAL-FAMILY',
+        REPEAT: 'REPEAT-FAMILY', STAFF: 'STAFF', TRAINING: 'TRAINING', WALKIN: 'WALK-IN', WEB: 'WEB-FAMILY',
+      },
+    },
+    Intimate: {
+      list: ['BRANDPARTNER-INTIMATE', 'CAMPAIGN-INTIMATE', 'ENQUIRY-INTIMATE', 'FUNDRAISER-INTIMATE',
+        'INFLUENCER-INTIMATE', 'REFERRAL-INTIMATE', 'REPEAT-INTIMATE', 'STAFF', 'TRAINING',
+        'WALK-IN', 'WEB-INTIMATE'],
+      concepts: {
+        CAMPAIGN: 'CAMPAIGN-INTIMATE', PARTNER: 'BRANDPARTNER-INTIMATE', ENQUIRY: 'ENQUIRY-INTIMATE',
+        FUNDRAISER: 'FUNDRAISER-INTIMATE', INFLUENCER: 'INFLUENCER-INTIMATE', REFERRAL: 'REFERRAL-INTIMATE',
+        REPEAT: 'REPEAT-INTIMATE', STAFF: 'STAFF', TRAINING: 'TRAINING', WALKIN: 'WALK-IN', WEB: 'WEB-INTIMATE',
+      },
+    },
+  };
+  const CHANNEL_SYNONYMS = {
+    CAMPAIGN: ['campaign'],
+    PARTNER: ['corporatepartner', 'corporate', 'brandpartner', 'brandpartnership', 'partner'],
+    ENQUIRY: ['enquiry', 'inquiry', 'enquiries', 'inquiries'],
+    FUNDRAISER: ['fundraiser', 'fundraising', 'fundraise'],
+    INFLUENCER: ['influencer', 'influencermarketing'],
+    REFERRAL: ['referral', 'referrals', 'referred'],
+    REPEAT: ['repeat', 'repeatclient', 'repeatcustomer', 'returning', 'returningclient', 'returningcustomer'],
+    STAFF: ['staff', 'employee', 'internal'],
+    TRAINING: ['training', 'trainingsession'],
+    WALKIN: ['walkin'],
+    WEB: ['web', 'website', 'websitepurchase', 'online', 'onlinepurchase', 'weblead'],
+  };
+  function normalizeChannelText(s) {
+    return String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  }
+  function findExactChannel(value, list) {
+    if (!value) return null;
+    const norm = String(value).trim().toLowerCase();
+    return list.find(item => item.toLowerCase() === norm) || null;
+  }
+  // Manual rules Finance actually applies by hand, checked BEFORE the raw
+  // Marketing Channel column, in this priority order: Repeat > Enquiry >
+  // Campaign. First match wins.
+  function applyChannelExceptionRules(sessionType, leadSource) {
+    const st = String(sessionType || '').toLowerCase();
+    if (/anniversary|repeat/.test(st)) return 'REPEAT';
+    const ls = String(leadSource || '').toLowerCase();
+    if (/enquiry/.test(ls)) return 'ENQUIRY';
+    if (/campaign|giveaway|marketing/.test(ls)) return 'CAMPAIGN';
+    return null;
+  }
+  // Resolves a row's Marketing Channel to the exact official label for its
+  // brand. Exception rules first, then exact match against the official
+  // list, then a substring synonym match (longest/most-specific wins —
+  // real files often prefix the channel with the brand name, e.g.
+  // "Intimate Website Purchase", which won't equal a bare "website").
+  // Returns { resolved, wasInferred }; resolved is null if nothing matched.
+  function resolveMarketingChannel(rawChannel, sessionType, leadSource, brand) {
+    const brandChannels = CHANNEL_CONCEPTS_BY_BRAND[brand];
+    if (!brandChannels) return { resolved: null, wasInferred: false };
+
+    const exceptionConcept = applyChannelExceptionRules(sessionType, leadSource);
+    if (exceptionConcept && brandChannels.concepts[exceptionConcept]) {
+      return { resolved: brandChannels.concepts[exceptionConcept], wasInferred: true };
+    }
+
+    const raw = String(rawChannel || '').trim();
+    if (!raw) return { resolved: null, wasInferred: false };
+
+    const exact = findExactChannel(raw, brandChannels.list);
+    if (exact) return { resolved: exact, wasInferred: false };
+
+    const norm = normalizeChannelText(raw);
+    let best = null;
+    for (const concept in CHANNEL_SYNONYMS) {
+      if (!(concept in brandChannels.concepts)) continue;
+      for (const syn of CHANNEL_SYNONYMS[concept]) {
+        if (norm.includes(syn) && (!best || syn.length > best.syn.length)) best = { concept, syn };
+      }
+    }
+    if (best) return { resolved: brandChannels.concepts[best.concept], wasInferred: true };
+    return { resolved: null, wasInferred: false };
+  }
+
   // ── Location → state (for public holiday checks) ───────────────────
   const LOCATION_STATE = {
     'verve portraits - alexandria': 'NSW',
@@ -339,6 +431,7 @@
     manifest: [],
     corrections: [],  // rate corrections log
     rankingOverrides: [],  // Elevate ranking override log
+    channelInferredCount: 0,  // rows where Marketing Channel was normalised/inferred rather than an exact match
   };
 
   const SKIP_NAMES = new Set(['assign photographer', 'assign designer', 'total']);
@@ -787,6 +880,18 @@
           obj[col] = val;
         }
 
+        // Also capture every OTHER recognised column from the source file
+        // (e.g. Lead Source), beyond the trimmed per-contractor template.
+        // The individual per-contractor files still only ever read the
+        // templateCols above when they write out — these extra keys just
+        // ride along on the row object, unused there, but available for
+        // the collated file's detail tabs, which are meant to mirror the
+        // source file's full column set rather than the trimmed template.
+        for (const key of Object.keys(currentColMap)) {
+          if (key === '_NAME_' || key === '_EMAIL_' || key === '_FIRST_' || key === '_LAST_') continue;
+          if (obj[key] === undefined) obj[key] = extractRowValue(row, currentColMap, key);
+        }
+
         // Normalise ranking (Elevate → Elite)
         if (obj['Ranking']) obj['Ranking'] = normalizeRanking(obj['Ranking']);
 
@@ -796,6 +901,20 @@
 
         // Detect brand from location if not already present
         if (!obj['Brand']) obj['Brand'] = detectBrandFromLocation(obj['Location']);
+
+        // Normalise Marketing Channel to the official label for this
+        // brand — same identification logic as the Invoice Portal, so a
+        // channel like "Website Purchase" or "Intimate Web Lead" both
+        // resolve to "WEB-FAMILY"/"WEB-INTIMATE" consistently, and the
+        // collated file's Pivot tab groups by channel meaningfully
+        // instead of splintering into near-duplicate raw text variants.
+        {
+          const channelMatch = resolveMarketingChannel(obj['Marketing Channel'], obj['Session Type'], obj['Lead Source'], obj['Brand']);
+          if (channelMatch.resolved) {
+            obj['Marketing Channel'] = channelMatch.resolved;
+            if (channelMatch.wasInferred) state.channelInferredCount++;
+          }
+        }
 
         // Rate corrections
         applyRateCorrections(obj, name, isNoShow, isDesigner);
@@ -858,11 +977,23 @@
         let val = extractRowValue(row, colMap, col);
         obj[col] = val;
       }
+      for (const key of Object.keys(colMap)) {
+        if (key === '_NAME_' || key === '_EMAIL_' || key === '_FIRST_' || key === '_LAST_') continue;
+        if (obj[key] === undefined) obj[key] = extractRowValue(row, colMap, key);
+      }
 
       if (obj['Ranking']) obj['Ranking'] = normalizeRanking(obj['Ranking']);
       const sessionNoVal = obj['Session No'] || '';
       obj['Location'] = resolveLocation(obj['Location'], sessionNoVal);
       if (!obj['Brand']) obj['Brand'] = detectBrandFromLocation(obj['Location']);
+
+      {
+        const channelMatch = resolveMarketingChannel(obj['Marketing Channel'], obj['Session Type'], obj['Lead Source'], obj['Brand']);
+        if (channelMatch.resolved) {
+          obj['Marketing Channel'] = channelMatch.resolved;
+          if (channelMatch.wasInferred) state.channelInferredCount++;
+        }
+      }
 
       applyRateCorrections(obj, name, isNoShow, isDesigner);
 
@@ -1173,6 +1304,7 @@
     const btn = $('#btnProcess');
     btn.disabled = true; btn.textContent = 'Processing…';
     state.corrections = [];
+    state.channelInferredCount = 0;
 
     try {
       // Reset parsed data
@@ -1375,6 +1507,10 @@
     const warnings = [];
     if (missingEmail > 0) warnings.push(`<strong>${missingEmail} contractor${missingEmail !== 1 ? 's' : ''} missing email.</strong> Type them in the Email column below — they'll be remembered for next time.`);
 
+    if (state.channelInferredCount > 0) {
+      warnings.push(`We automatically matched the marketing channel on ${state.channelInferredCount} row(s) for reporting.`);
+    }
+
     // Show Elevate ranking info
     if (elevateConnected && elevateRankings) {
       const overrides = state.rankingOverrides.filter(r => r.type === 'override');
@@ -1477,6 +1613,9 @@
     const missingEmail = m.filter(x => !x.email).length;
     const warnings = [];
     if (missingEmail > 0) warnings.push(`<strong>${missingEmail} contractor${missingEmail !== 1 ? 's' : ''} missing email.</strong> Type them in the Email column below — they'll be remembered for next time.`);
+    if (state.channelInferredCount > 0) {
+      warnings.push(`We automatically matched the marketing channel on ${state.channelInferredCount} row(s) for reporting.`);
+    }
     if (state.corrections.length > 0) {
       warnings.push(`<strong>${state.corrections.length} rate correction${state.corrections.length !== 1 ? 's' : ''} applied.</strong>`);
     }
@@ -1519,6 +1658,248 @@
       saveAs(await zip.generateAsync({ type: 'blob' }), `${period} - All Contractor Files.zip`);
     } catch (err) { alert('Error creating ZIP: ' + err.message); }
     finally { btn.disabled = false; btn.textContent = 'Download All as ZIP'; }
+  }
+
+  // ── Collated file (everyone, one workbook, 5 tabs) ──────────────────
+  // Summary, Eligible Sessions, No Show Sessions, Eligible Appointments,
+  // No Show Appointments — same underlying data as the per-contractor
+  // files, just laid out for someone who wants to see everyone at once
+  // (e.g. a finance reconciliation pass) rather than file-by-file.
+  function sumRate(rows) {
+    return rows.reduce((sum, r) => {
+      const v = parseFloat(r['Rate']);
+      return sum + (isNaN(v) ? 0 : v);
+    }, 0);
+  }
+
+  async function generateCollatedFile() {
+    const wb = new ExcelJS.Workbook();
+    const periodLabel = $('#periodLabel').value.trim();
+
+    // ---- Tab 1: Summary — two tables, Family then Intimate ----
+    // Each contractor's per-role file mixes both brands together (Brand
+    // is just a column on each row), so building brand-specific totals
+    // means filtering the same underlying rows by Brand rather than
+    // reading anything pre-split.
+    const summaryWs = wb.addWorksheet('Summary');
+    const summaryCols = ['Contractor', 'Role', 'Email', 'Eligible', 'Eligible $', 'No-Show', 'No-Show $', 'Total'];
+    summaryWs.columns = summaryCols.map(c => ({ width: c === 'Contractor' ? 26 : (c === 'Email' ? 26 : (c === 'Role' ? 14 : 13)) }));
+
+    let r = 1;
+    const titleRow = summaryWs.getRow(r);
+    titleRow.getCell(1).value = periodLabel ? `Collated Summary — ${periodLabel}` : 'Collated Summary';
+    titleRow.getCell(1).font = { bold: true, size: 14, color: { argb: '1A1A1A' } };
+    summaryWs.mergeCells(r, 1, r, summaryCols.length);
+    r += 2;
+
+    const photoEligByName = groupByName(state.parsedData.photoEligible);
+    const photoNSByName = groupByName(state.parsedData.photoNoShow);
+    const designEligByName = groupByName(state.parsedData.designEligible);
+    const designNSByName = groupByName(state.parsedData.designNoShow);
+    const byBrand = (rows, brand) => rows.filter(row => (row['Brand'] || '').toString().trim().toLowerCase() === brand.toLowerCase());
+
+    function writeBrandSummaryTable(brand, sectionColors) {
+      r = writeSectionTitle(summaryWs, r, `${brand.toUpperCase()} SUMMARY`, sectionColors.title, summaryCols.length);
+      r = writeHeaders(summaryWs, r, summaryCols, sectionColors.header);
+
+      let grandEligible = 0, grandEligibleTotal = 0, grandNoShow = 0, grandNoShowTotal = 0;
+      let rowsWritten = 0, contractorsIncluded = 0;
+
+      state.manifest.forEach((item) => {
+        const allEligRows = item.role === 'photographer' ? (photoEligByName[item.name] || []) : (designEligByName[item.name] || []);
+        const allNsRows = item.role === 'photographer' ? (photoNSByName[item.name] || []) : (designNSByName[item.name] || []);
+        const eligRows = byBrand(allEligRows, brand);
+        const nsRows = byBrand(allNsRows, brand);
+        if (!eligRows.length && !nsRows.length) return; // this contractor has no rows for this brand — skip
+
+        const eligibleTotal = sumRate(eligRows);
+        const noShowTotal = sumRate(nsRows);
+        grandEligible += eligRows.length; grandEligibleTotal += eligibleTotal;
+        grandNoShow += nsRows.length; grandNoShowTotal += noShowTotal;
+        contractorsIncluded++;
+
+        const rowObj = {
+          'Contractor': item.name,
+          'Role': item.role === 'photographer' ? 'Photographer' : 'Designer',
+          'Email': item.email || '(missing)',
+          'Eligible': eligRows.length,
+          'Eligible $': eligibleTotal,
+          'No-Show': nsRows.length,
+          'No-Show $': noShowTotal,
+          'Total': eligibleTotal + noShowTotal,
+        };
+        const row = summaryWs.getRow(r);
+        summaryCols.forEach((col, ci) => {
+          const cell = row.getCell(ci + 1);
+          cell.value = rowObj[col];
+          cell.font = { size: 9, color: { argb: '333333' } };
+          if (col === 'Eligible $' || col === 'No-Show $' || col === 'Total') cell.numFmt = '$#,##0.00';
+          if (rowsWritten % 2 === 1) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: sectionColors.altRow } };
+          cell.border = { bottom: { style: 'hair', color: { argb: 'DDDDDD' } } };
+        });
+        r++; rowsWritten++;
+      });
+
+      if (!contractorsIncluded) {
+        const cell = summaryWs.getRow(r).getCell(1);
+        cell.value = `No ${brand} rows this period.`;
+        cell.font = { italic: true, color: { argb: '6B6B6B' } };
+        summaryWs.mergeCells(r, 1, r, summaryCols.length);
+        r++;
+      } else {
+        const totalRow = summaryWs.getRow(r);
+        totalRow.getCell(1).value = `Total: ${contractorsIncluded} contractor${contractorsIncluded !== 1 ? 's' : ''}`;
+        totalRow.getCell(4).value = grandEligible;
+        totalRow.getCell(5).value = grandEligibleTotal;
+        totalRow.getCell(6).value = grandNoShow;
+        totalRow.getCell(7).value = grandNoShowTotal;
+        totalRow.getCell(8).value = grandEligibleTotal + grandNoShowTotal;
+        [5, 7, 8].forEach(c => { totalRow.getCell(c).numFmt = '$#,##0.00'; });
+        [1, 4, 5, 6, 7, 8].forEach(c => {
+          totalRow.getCell(c).font = { bold: true, size: 9 };
+          totalRow.getCell(c).border = { top: { style: 'thin', color: { argb: '999999' } } };
+        });
+        r++;
+      }
+      r += 2; // gap before the next brand's table
+    }
+
+    writeBrandSummaryTable('Family', COLORS.eligible);
+    writeBrandSummaryTable('Intimate', COLORS.noShow);
+
+    // ---- Tabs 2–5: every row, every contractor, with a Contractor column ----
+    // Collated detail tabs mirror the FULL set of columns Finance actually
+    // sent — not just the trimmed per-contractor template — so nothing
+    // from the source file goes missing here even if it was intentionally
+    // dropped from the individual files (e.g. Lead Source).
+    function unionColumns(templateCols, rows) {
+      const seen = new Set(templateCols);
+      const extra = [];
+      for (const row of rows) {
+        for (const key of Object.keys(row)) {
+          if (key === '_name' || seen.has(key)) continue;
+          seen.add(key); extra.push(key);
+        }
+      }
+      return [...templateCols, ...extra];
+    }
+
+    const sections = [
+      { sheetName: 'Eligible Sessions', data: state.parsedData.photoEligible, cols: PHOTO_ELIGIBLE_COLS, colors: COLORS.eligible },
+      { sheetName: 'No Show Sessions', data: state.parsedData.photoNoShow, cols: PHOTO_NOSHOW_COLS, colors: COLORS.noShow },
+      { sheetName: 'Eligible Appointments', data: state.parsedData.designEligible, cols: DESIGN_ELIGIBLE_COLS, colors: COLORS.eligible },
+      { sheetName: 'No Show Appointments', data: state.parsedData.designNoShow, cols: DESIGN_NOSHOW_COLS, colors: COLORS.noShow },
+    ];
+    for (const section of sections) {
+      const ws = wb.addWorksheet(section.sheetName);
+      const sectionCols = unionColumns(section.cols, section.data);
+      const cols = ['Contractor', ...sectionCols];
+      ws.columns = cols.map(c => ({ width: c === 'Contractor' ? 24 : 18 }));
+      let rr = 1;
+      rr = writeHeaders(ws, rr, cols, section.colors.header);
+      const rows = section.data.map(row => ({ Contractor: row['_name'] || '', ...row }));
+      if (!rows.length) {
+        const cell = ws.getRow(rr).getCell(1);
+        cell.value = 'No rows for this section.';
+        cell.font = { italic: true, color: { argb: '6B6B6B' } };
+        ws.mergeCells(rr, 1, rr, cols.length);
+        rr++;
+      } else {
+        rows.forEach((row, i) => { rr = writeDataRow(ws, rr, row, cols, i % 2 === 1 ? section.colors.altRow : null); });
+        rr = writeTotalRow(ws, rr, rows, cols, section.sheetName.includes('Appointment') ? 'designer' : 'photographer');
+      }
+    }
+
+    // ---- Tab 6: Pivot — Name / Location / Channel / Qty / Amount ------
+    // Four tables (Family Eligible, Family No-Show, Intimate Eligible,
+    // Intimate No-Show), each grouping the same underlying rows by
+    // contractor + location + marketing channel — a cross-cutting view
+    // for spotting patterns (e.g. one channel driving most of a
+    // contractor's volume) that the per-role detail tabs don't surface.
+    function buildPivotRows(rows) {
+      const groups = {};
+      for (const row of rows) {
+        const name = row['_name'] || '';
+        const location = row['Location'] || '(no location)';
+        const channel = row['Marketing Channel'] || '(no channel)';
+        const key = `${name}|||${location}|||${channel}`;
+        if (!groups[key]) groups[key] = { Name: name, Location: location, Channel: channel, Qty: 0, Amount: 0 };
+        groups[key].Qty += 1;
+        const rate = parseFloat(row['Rate']);
+        groups[key].Amount += isNaN(rate) ? 0 : rate;
+      }
+      return Object.values(groups).sort((a, b) =>
+        a.Name.localeCompare(b.Name) || a.Location.localeCompare(b.Location) || a.Channel.localeCompare(b.Channel));
+    }
+
+    const pivotWs = wb.addWorksheet('Pivot');
+    const pivotCols = ['Name', 'Location', 'Channel', 'Qty', 'Amount'];
+    pivotWs.columns = pivotCols.map(c => ({ width: c === 'Name' || c === 'Location' ? 26 : (c === 'Channel' ? 20 : 12) }));
+    let pr = 1;
+    const pivotTitleRow = pivotWs.getRow(pr);
+    pivotTitleRow.getCell(1).value = periodLabel ? `Pivot — ${periodLabel}` : 'Pivot';
+    pivotTitleRow.getCell(1).font = { bold: true, size: 14, color: { argb: '1A1A1A' } };
+    pivotWs.mergeCells(pr, 1, pr, pivotCols.length);
+    pr += 2;
+
+    function writePivotTable(title, rows, sectionColors) {
+      pr = writeSectionTitle(pivotWs, pr, title, sectionColors.title, pivotCols.length);
+      pr = writeHeaders(pivotWs, pr, pivotCols, sectionColors.header);
+      const pivotRows = buildPivotRows(rows);
+      if (!pivotRows.length) {
+        const cell = pivotWs.getRow(pr).getCell(1);
+        cell.value = 'No rows this period.';
+        cell.font = { italic: true, color: { argb: '6B6B6B' } };
+        pivotWs.mergeCells(pr, 1, pr, pivotCols.length);
+        pr++;
+      } else {
+        let totalQty = 0, totalAmount = 0;
+        pivotRows.forEach((row, i) => {
+          totalQty += row.Qty; totalAmount += row.Amount;
+          const wsRow = pivotWs.getRow(pr);
+          pivotCols.forEach((col, ci) => {
+            const cell = wsRow.getCell(ci + 1);
+            cell.value = row[col];
+            cell.font = { size: 9, color: { argb: '333333' } };
+            if (col === 'Amount') cell.numFmt = '$#,##0.00';
+            if (i % 2 === 1) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: sectionColors.altRow } };
+            cell.border = { bottom: { style: 'hair', color: { argb: 'DDDDDD' } } };
+          });
+          pr++;
+        });
+        const totalRow = pivotWs.getRow(pr);
+        totalRow.getCell(1).value = `Total: ${pivotRows.length} group${pivotRows.length !== 1 ? 's' : ''}`;
+        totalRow.getCell(4).value = totalQty;
+        totalRow.getCell(5).value = totalAmount;
+        totalRow.getCell(5).numFmt = '$#,##0.00';
+        [1, 4, 5].forEach(c => { totalRow.getCell(c).font = { bold: true, size: 9 }; totalRow.getCell(c).border = { top: { style: 'thin', color: { argb: '999999' } } }; });
+        pr++;
+      }
+      pr += 2;
+    }
+
+    const allEligible = [...state.parsedData.photoEligible, ...state.parsedData.designEligible];
+    const allNoShow = [...state.parsedData.photoNoShow, ...state.parsedData.designNoShow];
+    const byBrandFlat = (rows, brand) => rows.filter(row => (row['Brand'] || '').toString().trim().toLowerCase() === brand.toLowerCase());
+
+    writePivotTable('FAMILY — ELIGIBLE', byBrandFlat(allEligible, 'Family'), COLORS.eligible);
+    writePivotTable('FAMILY — NO SHOW', byBrandFlat(allNoShow, 'Family'), COLORS.noShow);
+    writePivotTable('INTIMATE — ELIGIBLE', byBrandFlat(allEligible, 'Intimate'), COLORS.eligible);
+    writePivotTable('INTIMATE — NO SHOW', byBrandFlat(allNoShow, 'Intimate'), COLORS.noShow);
+
+    const buffer = await wb.xlsx.writeBuffer();
+    return new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  }
+
+  async function downloadCollated() {
+    const btn = $('#btnDownloadCollated');
+    btn.disabled = true; btn.textContent = 'Building…';
+    try {
+      const blob = await generateCollatedFile();
+      const period = $('#periodLabel').value.trim() || 'Verve';
+      saveAs(blob, `${period} - Collated (All Contractors).xlsx`);
+    } catch (err) { alert('Error creating collated file: ' + err.message); }
+    finally { btn.disabled = false; btn.textContent = 'Download Collated File'; }
   }
 
   // ── Export contacts ───────────────────────────────────────────────
@@ -1640,13 +2021,33 @@
   }
 
   // ── Init ──────────────────────────────────────────────────────────
+  function initThemeToggle() {
+    const btn = $('#themeToggle');
+    if (!btn) return;
+    const updateIcon = () => {
+      const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+      btn.textContent = isDark ? '☀️' : '🌙';
+      btn.title = isDark ? 'Switch to light mode' : 'Switch to dark mode';
+    };
+    updateIcon();
+    btn.addEventListener('click', () => {
+      const current = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+      const next = current === 'dark' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', next);
+      try { localStorage.setItem('verveDistPortal_theme', next); } catch (e) { /* ignore */ }
+      updateIcon();
+    });
+  }
+
   function init() {
     initUploads();
     initFilters();
     initElevateUI();
+    initThemeToggle();
     showSavedContactCount();
     $('#btnProcess').addEventListener('click', processFiles);
     $('#btnDownloadAll').addEventListener('click', downloadAll);
+    $('#btnDownloadCollated').addEventListener('click', downloadCollated);
     $('#btnBack').addEventListener('click', () => {
       $('#step-preview').classList.remove('active');
       $('#step-upload').classList.add('active');
