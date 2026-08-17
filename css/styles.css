@@ -361,6 +361,8 @@ main { max-width: 1100px; margin: 0 auto; padding: 0 1.5rem 3rem; }
 }
 
 .count-cell { text-align: center; }
+.select-cell { text-align: center; width: 34px; }
+.select-cell input[type=checkbox], .send-checkbox { width: 15px; height: 15px; cursor: pointer; accent-color: var(--brand); }
 .download-link { color: var(--brand); text-decoration: none; font-weight: 600; cursor: pointer; }
 .download-link:hover { text-decoration: underline; }
 .hidden-row { display: none; }
