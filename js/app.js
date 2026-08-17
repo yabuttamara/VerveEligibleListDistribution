@@ -557,14 +557,28 @@
     }
   }
 
+  // Pulls just "29 Jul" out of the full "Fortnight Ending 29 JUL 2026
+  // (16 Jul 2026 - 29 Jul 2026)" label, so the connected pill stays
+  // compact enough to read at a glance even when the panel is collapsed.
+  function shortPeriodLabel(fullLabel) {
+    if (!fullLabel) return '';
+    const m = fullLabel.match(/Ending\s+(\d{1,2})\s+([A-Za-z]{3})/i);
+    if (!m) return '';
+    const month = m[2][0].toUpperCase() + m[2].slice(1).toLowerCase();
+    return `FNE ${m[1]} ${month}`;
+  }
+
   function updateElevateStatus() {
     const statusEl = $('#elevateStatus');
     if (elevateConnected && elevateRankings) {
       const count = Object.keys(elevateRankings.rankings || {}).length;
-      statusEl.textContent = `Connected (${count})`;
+      const periodPart = shortPeriodLabel(elevateRankings.periodLabel);
+      statusEl.textContent = periodPart ? `Connected (${count}) · ${periodPart}` : `Connected (${count})`;
+      statusEl.title = elevateRankings.periodLabel || '';
       statusEl.classList.add('connected');
     } else {
       statusEl.textContent = 'Not connected';
+      statusEl.title = '';
       statusEl.classList.remove('connected');
     }
   }
@@ -1546,12 +1560,14 @@
     table.className = 'preview-table';
     table.innerHTML = `
       <thead><tr>
+        <th class="select-cell"><input type="checkbox" id="selectAllCheckbox" checked title="Select/deselect all"></th>
         <th>Contractor</th><th>Role</th><th>Email</th>
         <th>Eligible</th><th>No Show</th><th>Download</th><th>Status</th>
       </tr></thead>
       <tbody>${m.map((item, idx) => {
         const sourceLabel = item.emailSource === 'uploaded' ? 'from file' : item.emailSource === 'data' ? 'from data' : item.emailSource === 'saved' ? 'remembered' : '';
         return `<tr data-role="${item.role}" data-has-email="${item.email ? 'yes' : 'no'}" data-idx="${idx}">
+          <td class="select-cell"><input type="checkbox" class="send-checkbox" data-idx="${idx}" checked></td>
           <td><strong>${item.name}</strong></td>
           <td><span class="role-badge ${item.role}">${item.role === 'photographer' ? 'Photographer' : 'Designer'}</span></td>
           <td>
@@ -1566,6 +1582,25 @@
       }).join('')}</tbody>`;
     $('#previewTable').innerHTML = '';
     $('#previewTable').appendChild(table);
+
+    // Master "select all" checkbox — checked/indeterminate reflects the
+    // current state of the individual row checkboxes, and clicking it
+    // sets every (currently visible-or-not — filters only hide rows,
+    // they don't remove them) row checkbox to match.
+    const selectAllBox = $('#selectAllCheckbox');
+    function syncSelectAllState() {
+      const boxes = [...table.querySelectorAll('.send-checkbox')];
+      const checkedCount = boxes.filter(b => b.checked).length;
+      selectAllBox.checked = checkedCount === boxes.length;
+      selectAllBox.indeterminate = checkedCount > 0 && checkedCount < boxes.length;
+    }
+    selectAllBox.addEventListener('change', () => {
+      table.querySelectorAll('.send-checkbox').forEach(b => { b.checked = selectAllBox.checked; });
+      selectAllBox.indeterminate = false;
+    });
+    table.querySelectorAll('.send-checkbox').forEach(box => {
+      box.addEventListener('change', syncSelectAllState);
+    });
 
     // Email input change → save to localStorage
     table.querySelectorAll('.email-input').forEach(input => {
@@ -1968,8 +2003,21 @@
   }
 
   async function sendAllEmails() {
-    const sendable = state.manifest.filter(m => m.email);
-    if (!sendable.length) { alert('No contractors have email addresses. Add emails in the table first.'); return; }
+    // "Sendable" = has an email AND its row checkbox is still checked.
+    // The checkbox is what lets a partial re-send work safely — e.g.
+    // reprocessing a file after adding one contractor shouldn't re-email
+    // everyone who already got their file in an earlier run.
+    const checkedIdxs = new Set(
+      [...document.querySelectorAll('.send-checkbox')].filter(b => b.checked).map(b => parseInt(b.dataset.idx))
+    );
+    const sendable = state.manifest.filter((m, idx) => m.email && checkedIdxs.has(idx));
+    if (!sendable.length) {
+      const anyChecked = checkedIdxs.size > 0;
+      alert(anyChecked
+        ? 'None of the selected contractors have an email address yet. Add emails in the table first.'
+        : 'No contractors are selected. Tick the checkbox next to whoever you want to email, or use the header checkbox to select everyone.');
+      return;
+    }
 
     const msg = `Ready to send ${sendable.length} email${sendable.length !== 1 ? 's' : ''}?\n\n` +
       sendable.map(m => `  ${m.name} → ${m.email}`).join('\n') +
@@ -1988,7 +2036,13 @@
     showProgress('Sending emails…', 0, sendable.length);
 
     for (const item of state.manifest) {
-      const statusEl = $(`#status-${state.manifest.indexOf(item)}`);
+      const idx = state.manifest.indexOf(item);
+      const statusEl = $(`#status-${idx}`);
+      if (!checkedIdxs.has(idx)) {
+        statusEl.textContent = 'Not selected';
+        statusEl.className = 'send-status skipped';
+        continue;
+      }
       if (!item.email) {
         statusEl.textContent = 'No email';
         statusEl.className = 'send-status skipped';
