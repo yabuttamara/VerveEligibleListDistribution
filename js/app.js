@@ -326,6 +326,13 @@
     if (state === 'VIC') {
       list.push({ date: nthWeekdayOfMonthUTC(year, 3, 1, 2), name: 'Labour Day (VIC)' });
       list.push({ date: nthWeekdayOfMonthUTC(year, 6, 1, 2), name: "King's Birthday (VIC)" });
+      // AFL Grand Final Friday — Friday before the last Saturday in September
+      const lastDaySep = new Date(Date.UTC(year, 8, 30));
+      const lastDaySepDow = lastDaySep.getUTCDay();
+      // Find the last Saturday: walk back from Sep 30
+      const lastSatOffset = (lastDaySepDow >= 6) ? (lastDaySepDow - 6) : (lastDaySepDow + 1);
+      const aflFriday = addDaysUTC(lastDaySep, -lastSatOffset - 1);
+      list.push({ date: aflFriday, name: 'AFL Grand Final Friday (VIC)' });
       list.push({ date: nthWeekdayOfMonthUTC(year, 11, 2, 1), name: 'Melbourne Cup Day' });
     } else if (state === 'NSW') {
       list.push({ date: nthWeekdayOfMonthUTC(year, 6, 1, 2), name: "King's Birthday (NSW)" });
